@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { TngaApi } from '../services/api';
+import TorqueChart from '../components/TorqueChart';
 import {
   TrendingUp,
   AlertTriangle,
@@ -30,9 +31,10 @@ export default function TrendsPage() {
   const [selectedWrenchId, setSelectedWrenchId] = useState('URYU_ST28_F016');
   const [selectedDays, setSelectedDays] = useState(8); // 8 days as in sketch
   const [trendData, setTrendData] = useState(null);
-  const [viewMode, setViewMode] = useState('single'); // 'single' | 'compare'
+  const [viewMode, setViewMode] = useState('single'); // 'single' | 'torque' | 'compare'
   const [compareIds, setCompareIds] = useState(['URYU_ST28_F016', 'URYU_STBlock_sub_assy_F001', 'YOKOTA_ST58_F0250']);
   const [compareData, setCompareData] = useState(null);
+  const [wrenchDetail, setWrenchDetail] = useState(null);
   const [loading, setLoading] = useState(true);
 
   // Load all wrenches
@@ -46,6 +48,11 @@ export default function TrendsPage() {
     if (viewMode === 'single') {
       TngaApi.getDailyTrends(selectedWrenchId, selectedDays)
         .then(res => setTrendData(res.data))
+        .catch(console.error)
+        .finally(() => setLoading(false));
+    } else if (viewMode === 'torque') {
+      TngaApi.getWrenchDetail(selectedWrenchId)
+        .then(res => setWrenchDetail(res))
         .catch(console.error)
         .finally(() => setLoading(false));
     } else {
@@ -198,7 +205,23 @@ export default function TrendsPage() {
                 boxShadow: viewMode === 'single' ? 'var(--shadow-sm)' : 'none'
               }}
             >
-              Single Tool Analysis
+              Avg Pulse / Day
+            </button>
+            <button
+              onClick={() => setViewMode('torque')}
+              style={{
+                padding: '6px 14px',
+                borderRadius: '6px',
+                fontSize: '12px',
+                fontWeight: 600,
+                border: 'none',
+                cursor: 'pointer',
+                background: viewMode === 'torque' ? '#ffffff' : 'transparent',
+                color: viewMode === 'torque' ? 'var(--accent-blue)' : 'var(--text-muted)',
+                boxShadow: viewMode === 'torque' ? 'var(--shadow-sm)' : 'none'
+              }}
+            >
+              Torque vs Time
             </button>
             <button
               onClick={() => setViewMode('compare')}
@@ -550,6 +573,17 @@ export default function TrendsPage() {
             </table>
           </div>
         </>
+      ) : viewMode === 'torque' ? (
+        /* Torque vs Time Single Tool Graph */
+        <div>
+          <TorqueChart
+            chartData={wrenchDetail?.analytics?.chartData || []}
+            toolName={wrenchDetail?.wrench?.tool_name || trendData?.tool_name || ''}
+            targetTorque={wrenchDetail?.wrench?.approved_torque_target || 20.0}
+            torqueMin={wrenchDetail?.wrench?.approved_torque_min || 17.0}
+            torqueMax={wrenchDetail?.wrench?.approved_torque_max || 23.0}
+          />
+        </div>
       ) : (
         /* Multi-Wrench Overlay Comparison (Section 2.5 D) */
         <div className="card">

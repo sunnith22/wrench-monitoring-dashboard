@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { TngaApi } from '../services/api';
+import TorqueChart from '../components/TorqueChart';
 import {
   Wrench,
   Activity,
@@ -299,6 +300,15 @@ export default function WrenchAnalysisPage({ wrenchId, onSelectWrench }) {
               </ResponsiveContainer>
             </div>
           </div>
+
+          {/* 3B. Torque vs Time Graph (Section 2.5 E) */}
+          <TorqueChart
+            chartData={chartData}
+            toolName={wrench?.tool_name || ''}
+            targetTorque={wrench?.approved_torque_target || 20.0}
+            torqueMin={wrench?.approved_torque_min || 17.0}
+            torqueMax={wrench?.approved_torque_max || 23.0}
+          />
 
           {/* 4. Daily Average Pulse Count Summary (Section 2.5 C) */}
           <div className="card" style={{ marginBottom: '22px' }}>
