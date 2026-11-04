@@ -1,6 +1,6 @@
 const axios = require('axios');
 const crypto = require('crypto');
-const { query } = require('../config/postgresDB');
+const { query, localFallbackCycles } = require('../config/postgresDB');
 
 const URYU_API_URL = process.env.FINALDB_API_URL || 'http://10.82.126.73:8121';
 const YOKOTA_API_URL = process.env.YOKOTA_API_URL || 'http://10.82.126.73:8127';
@@ -14,25 +14,22 @@ let lastUpstreamCheckTime = 0;
  */
 async function checkUpstreamAvailability() {
   const now = Date.now();
-  if (upstreamChecked && (now - lastUpstreamCheckTime < 45000)) {
+  if (upstreamChecked && (now - lastUpstreamCheckTime < 30000)) {
     return isUpstreamAlive;
   }
 
   try {
     lastUpstreamCheckTime = now;
-    // Fast 500ms probe to line controller
     await axios.get(`${URYU_API_URL}/api/torque-data`, {
-      params: { station: '28', folder: '016', date: '20261104' },
-      timeout: 500
+      params: { station: '28', folder: '016' },
+      timeout: 1000
     });
     isUpstreamAlive = true;
     upstreamChecked = true;
   } catch (err) {
     if (err.response) {
-      // Endpoint exists and returned HTTP status
       isUpstreamAlive = true;
     } else {
-      // Network unreachable, refused, or timed out
       isUpstreamAlive = false;
     }
     upstreamChecked = true;
@@ -50,16 +47,76 @@ function generateRecordKey(wrenchId, timestamp, engineNo, workNo) {
 }
 
 /**
+ * Cache live shop-floor records into local memory store so dashboard overview is fast
+ */
+function cacheLiveRecords(records) {
+  if (!records || records.length === 0) return;
+  for (const rec of records) {
+    const exists = localFallbackCycles.some(c => c.wrench_id === rec.wrench_id && c.tightening_time === rec.timestamp);
+    if (!exists) {
+      localFallbackCycles.push({
+        id: localFallbackCycles.length + 1,
+        wrench_id: rec.wrench_id,
+        tool_name: rec.tool_name,
+        station: rec.station,
+        line: rec.line || 'MK1',
+        engine_no: rec.engine_number,
+        tightening_time: rec.timestamp,
+        reception_time: rec.reception_timestamp || rec.timestamp,
+        torque_val: rec.torque,
+        torque_status: rec.judgement,
+        angle_val: rec.angle,
+        angle_status: 'OK',
+        pulse_count: rec.pulse_count,
+        pulse_status: rec.judgement === 'NG' ? 'CRITICAL' : 'NORMAL',
+        cycle_counter: localFallbackCycles.length + 1,
+        folder: rec.folder,
+        created_at: new Date().toISOString()
+      });
+    }
+  }
+}
+
+/**
  * Fetch tightening data for a given wrench asset and calendar date:
- * Tier 1: Check PostgreSQL `wrench_tightening_cycles` (or resilient pre-seeded local store)
- * Tier 2: Call live shop-floor PC API (http://10.82.126.73:8121/api/torque-data) if online
+ * Tier 1: Check Live Shop-Floor PC API (http://10.82.126.73:8121/api/torque-data) FIRST
+ * Tier 2: Check PostgreSQL `wrench_tightening_cycles` (if connected and tables exist)
  * Tier 3: High-fidelity plant simulation fallback
  */
 async function fetchWrenchOperations(wrenchAsset, dateStr) {
   const targetDate = dateStr || new Date().toISOString().split('T')[0];
   const dateKey = targetDate.replace(/-/g, '');
 
-  // 1. Try PostgreSQL / Local Store query
+  // 1. Try Live API (http://10.82.126.73:8121) FIRST (Shop-Floor PC is verified ONLINE)
+  try {
+    if (wrenchAsset.brand === 'URYU') {
+      const response = await axios.get(`${URYU_API_URL}/api/torque-data`, {
+        params: { station: wrenchAsset.station, folder: wrenchAsset.folder, date: dateKey },
+        timeout: 2000
+      });
+      const rows = Array.isArray(response.data) ? response.data : (Array.isArray(response.data?.data) ? response.data.data : []);
+      if (rows.length > 0) {
+        const normalized = normalizeRecords(rows, wrenchAsset, targetDate);
+        cacheLiveRecords(normalized);
+        return normalized;
+      }
+    } else {
+      const response = await axios.get(`${YOKOTA_API_URL}/api/yokota-data`, {
+        params: { station: wrenchAsset.station, folder: wrenchAsset.folder, date: dateKey },
+        timeout: 1000
+      });
+      const rows = Array.isArray(response.data) ? response.data : (Array.isArray(response.data?.data) ? response.data.data : []);
+      if (rows.length > 0) {
+        const normalized = normalizeRecords(rows, wrenchAsset, targetDate);
+        cacheLiveRecords(normalized);
+        return normalized;
+      }
+    }
+  } catch (liveErr) {
+    // Live API returned no data for this specific folder/date or timed out
+  }
+
+  // 2. Try PostgreSQL if tables exist and connected
   try {
     const sqlRes = await query(
       `SELECT * FROM wrench_tightening_cycles 
@@ -95,38 +152,10 @@ async function fetchWrenchOperations(wrenchAsset, dateStr) {
       }));
     }
   } catch (sqlErr) {
-    // Continue to live API / generator
+    // Fall through to generator
   }
 
-  // 2. Try Live API (http://10.82.126.73:8121) if upstream is alive
-  const upstreamOnline = await checkUpstreamAvailability();
-  if (upstreamOnline) {
-    try {
-      if (wrenchAsset.brand === 'URYU') {
-        const response = await axios.get(`${URYU_API_URL}/api/torque-data`, {
-          params: { station: wrenchAsset.station, folder: wrenchAsset.folder, date: dateKey },
-          timeout: 1000
-        });
-        const rows = Array.isArray(response.data) ? response.data : (Array.isArray(response.data?.data) ? response.data.data : []);
-        if (rows.length > 0) {
-          return normalizeRecords(rows, wrenchAsset, targetDate);
-        }
-      } else {
-        const response = await axios.get(`${YOKOTA_API_URL}/api/yokota-data`, {
-          params: { station: wrenchAsset.station, folder: wrenchAsset.folder, date: dateKey },
-          timeout: 1000
-        });
-        const rows = Array.isArray(response.data) ? response.data : (Array.isArray(response.data?.data) ? response.data.data : []);
-        if (rows.length > 0) {
-          return normalizeRecords(rows, wrenchAsset, targetDate);
-        }
-      }
-    } catch (err) {
-      // Upstream offline fallback
-    }
-  }
-
-  // 3. Fallback to high-fidelity plant simulation generator
+  // 3. Fallback to plant simulation generator
   return generatePlantOperations(wrenchAsset, targetDate);
 }
 
@@ -169,7 +198,7 @@ function normalizeRecords(rawRows, wrenchAsset, dateStr) {
       judgement: judgement.toUpperCase().includes('NG') ? 'NG' : 'OK',
       axis_mount_count: 1,
       source_file: `F-Data_ST${wrenchAsset.station}_${dateStr.replace(/-/g, '')}.csv`,
-      import_status: 'VALIDATED'
+      import_status: 'LIVE_SHOP_FLOOR'
     };
   });
 }
@@ -193,12 +222,11 @@ function generatePlantOperations(wrenchAsset, dateStr) {
     const engineNo = `NG60${200 + i}`;
     const workNo = "1";
 
-    // Inject realistic intermittent industrial spikes (e.g. at cycle 16 and cycle 31)
     let pulseCount;
     if (i === 16) {
-      pulseCount = baseThreshold + 4; // Critical threshold breach
+      pulseCount = baseThreshold + 4; // Critical spike
     } else if (i === 31) {
-      pulseCount = baseThreshold + 2; // Warning breach
+      pulseCount = baseThreshold + 2; // Warning spike
     } else {
       const variation = Math.round((Math.sin(i / 3) * 1.8) + (Math.random() * 2.2 - 1.1));
       pulseCount = Math.max(12, Math.round(nominalMean + variation));
