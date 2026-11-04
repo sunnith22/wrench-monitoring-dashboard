@@ -15,21 +15,13 @@ const DEFAULT_SCHEDULE = [
 // Default initial email alert configuration
 const DEFAULT_EMAIL_CONFIG = {
   enabled: true,
-  recipients: [
-    'quality.lead@plant.toyota.com',
-    'maintenance.shift1@plant.toyota.com',
-    'sunnith.g@toyota.com'
-  ],
-  cooldownMinutes: 10,
+  recipients: (process.env.DEFAULT_ALERT_EMAILS || 'quality.lead@plant.toyota.com,maintenance.shift1@plant.toyota.com')
+    .split(',')
+    .map(s => s.trim().toLowerCase())
+    .filter(Boolean),
+  cooldownMinutes: parseInt(process.env.ALERT_COOLDOWN_MINUTES || '10', 10),
   sendOnWarning: true,
-  sendOnCritical: true,
-  smtp: {
-    host: process.env.SMTP_HOST || 'smtp.gmail.com',
-    port: parseInt(process.env.SMTP_PORT || '587', 10),
-    user: process.env.SMTP_USER || '',
-    pass: process.env.SMTP_PASS || '',
-    from: process.env.ALERT_FROM_EMAIL || '"TNGA Pulse Alert System" <no-reply@toyota-tnga.com>'
-  }
+  sendOnCritical: true
 };
 
 let inMemoryConfig = null;
@@ -290,7 +282,18 @@ function bulkUpdateThresholds(wrenchIds, { delta, pulse_limit, email_trigger_ena
 // ---------------- EMAIL CONFIG ----------------
 function getEmailConfig() {
   const config = loadConfig();
-  return config.emailConfig || DEFAULT_EMAIL_CONFIG;
+  const cfg = config.emailConfig || DEFAULT_EMAIL_CONFIG;
+  // Always inject sensitive SMTP settings dynamically from .env so passwords are never stored in JSON
+  return {
+    ...cfg,
+    smtp: {
+      host: process.env.SMTP_HOST || 'smtp.gmail.com',
+      port: parseInt(process.env.SMTP_PORT || '587', 10),
+      secure: process.env.SMTP_SECURE === 'true' || process.env.SMTP_PORT === '465',
+      user: process.env.SMTP_USER || '',
+      from: process.env.SMTP_FROM || process.env.ALERT_FROM_EMAIL || '"TNGA Pulse Alert System" <no-reply@toyota-tnga.com>'
+    }
+  };
 }
 
 function updateEmailConfig(updateData, user = 'Admin') {
@@ -307,16 +310,18 @@ function updateEmailConfig(updateData, user = 'Admin') {
   if (updateData.sendOnWarning !== undefined) config.emailConfig.sendOnWarning = Boolean(updateData.sendOnWarning);
   if (updateData.sendOnCritical !== undefined) config.emailConfig.sendOnCritical = Boolean(updateData.sendOnCritical);
 
+  // Never write passwords or sensitive auth keys into runtimeConfig.json
   if (updateData.smtp) {
+    const { user: _u, pass: _p, password: _pwd, ...safeSmtp } = updateData.smtp;
     config.emailConfig.smtp = {
-      ...config.emailConfig.smtp,
-      ...updateData.smtp
+      ...(config.emailConfig.smtp || {}),
+      ...safeSmtp
     };
   }
 
   recordAudit('UPDATE_EMAIL_CONFIG', `Updated email alert settings (${config.emailConfig.recipients.length} recipients, cooldown: ${config.emailConfig.cooldownMinutes}m)`, user);
   saveConfigToDisk();
-  return config.emailConfig;
+  return getEmailConfig();
 }
 
 function getAuditLogs() {

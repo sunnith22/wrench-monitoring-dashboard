@@ -1,29 +1,50 @@
 const nodemailer = require('nodemailer');
 const { getEmailConfig, getToolThresholdDetails } = require('./configService');
 
-// Map of tool_id => last email sent timestamp ms
+// Map of tool_id => last email sent timestamp ms (in-memory cooldown guard)
 const lastSentTimestamps = new Map();
 const emailDispatchHistory = [];
 
-let transporter = null;
+/**
+ * Sensitive SMTP & Notification credentials sourced strictly from Environment Variables (.env)
+ * No passwords, hostnames, or auth keys are hardcoded or stored in JSON files.
+ */
+function getSmtpCredentials() {
+  return {
+    host: process.env.SMTP_HOST || 'smtp.gmail.com',
+    port: parseInt(process.env.SMTP_PORT || '587', 10),
+    secure: process.env.SMTP_SECURE === 'true' || process.env.SMTP_PORT === '465',
+    user: process.env.SMTP_USER || '',
+    pass: process.env.SMTP_PASS || process.env.SMTP_PASSWORD || '',
+    from: process.env.SMTP_FROM || process.env.ALERT_FROM_EMAIL || '"TNGA Pulse Alert System" <no-reply@toyota-tnga.com>',
+    dashboardUrl: process.env.MAIN_DASHBOARD_URL || 'http://localhost:3010',
+    adminPortalUrl: process.env.ADMIN_PORTAL_URL || 'http://localhost:3020'
+  };
+}
 
+/**
+ * Builds resilient Nodemailer Transporter using strictly environment credentials
+ */
 function getMailTransporter() {
-  const config = getEmailConfig();
-  const smtp = config.smtp || {};
+  const smtp = getSmtpCredentials();
 
+  // If environment provides valid SMTP credentials, use real authenticated transport
   if (smtp.user && smtp.pass) {
     return nodemailer.createTransport({
-      host: smtp.host || 'smtp.gmail.com',
-      port: smtp.port || 587,
-      secure: smtp.port === 465,
+      host: smtp.host,
+      port: smtp.port,
+      secure: smtp.secure,
       auth: {
         user: smtp.user,
         pass: smtp.pass
+      },
+      tls: {
+        rejectUnauthorized: process.env.SMTP_REJECT_UNAUTHORIZED !== 'false'
       }
     });
   }
 
-  // Development / unconfigured SMTP transporter: logs to stream
+  // Fallback / Development mode (unconfigured SMTP in .env): logs to safe stream output without crashing
   return nodemailer.createTransport({
     streamTransport: true,
     newline: 'windows',
@@ -42,7 +63,7 @@ function isCooldownActive(wrenchId, cooldownMinutes = 10) {
 }
 
 /**
- * Dispatches an email when pulse count crosses threshold
+ * Dispatches an automated email when a tool's pulse count breaches the configured limit
  */
 async function dispatchPulseEmailAlert({
   wrenchId,
@@ -59,22 +80,28 @@ async function dispatchPulseEmailAlert({
 }) {
   const emailConfig = getEmailConfig();
   if (!emailConfig.enabled) {
-    console.log(`[Email Alert] Suppressed for ${wrenchId}: Email alert master switch is OFF.`);
+    console.log(`[Email Alert] Suppressed for ${wrenchId}: Master switch is disabled.`);
     return { status: 'DISABLED', reason: 'Email alerts globally disabled' };
   }
 
-  const cooldown = emailConfig.cooldownMinutes || 10;
+  const cooldown = emailConfig.cooldownMinutes || parseInt(process.env.ALERT_COOLDOWN_MINUTES || '10', 10);
   if (isCooldownActive(wrenchId, cooldown)) {
-    console.log(`[Email Alert] Cooldown active for ${wrenchId} (${cooldown}m window). Skipping duplicate email.`);
+    console.log(`[Email Alert] Cooldown active for ${wrenchId} (${cooldown}m window). Skipping duplicate alert.`);
     return { status: 'COOLDOWN', reason: `In cooldown (${cooldown}m)` };
   }
 
-  const recipients = emailConfig.recipients || [];
+  // Resolve recipients: dynamic Admin Portal list, with fallback to .env DEFAULT_ALERT_EMAILS
+  let recipients = emailConfig.recipients || [];
+  if (recipients.length === 0 && process.env.DEFAULT_ALERT_EMAILS) {
+    recipients = process.env.DEFAULT_ALERT_EMAILS.split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+  }
+
   if (recipients.length === 0) {
-    console.warn(`[Email Alert] No recipients registered in Email Config. Alert not sent.`);
+    console.warn(`[Email Alert] No recipients configured in Admin Portal or .env. Alert not sent.`);
     return { status: 'NO_RECIPIENTS', reason: 'No recipients configured' };
   }
 
+  const smtp = getSmtpCredentials();
   const excess = measuredPulse - pulseLimit;
   const subject = `⚠️ [TNGA ALERT] Pulse Threshold Breached: ${toolName} (Station ${station}) — Observed ${measuredPulse} pulses (Limit: ${pulseLimit})`;
 
@@ -161,11 +188,11 @@ async function dispatchPulseEmailAlert({
             <strong>Action Required:</strong> Inspect tool joint lubricity and mechanical pulse unit. If wear is confirmed, replace tool or adjust threshold in the Admin Portal.
           </p>
 
-          <a href="http://localhost:3010/wrench/${wrenchId}" class="btn">View Tool Analysis in Dashboard</a>
+          <a href="${smtp.dashboardUrl}/wrench/${wrenchId}" class="btn">View Tool Analysis in Dashboard</a>
         </div>
         <div class="footer">
-          Toyota Kirloskar TNGA Engine Assembly | Pulse Monitoring System<br>
-          To change this limit or alert recipients, login to the Admin Portal at <a href="http://localhost:3020">http://localhost:3020</a>
+          Toyota Industries Engine India • TNGA Production Line<br>
+          To change this limit or alert recipients, login to the Admin Portal at <a href="${smtp.adminPortalUrl}">${smtp.adminPortalUrl}</a>
         </div>
       </div>
     </body>
@@ -175,7 +202,7 @@ async function dispatchPulseEmailAlert({
   try {
     const mailer = getMailTransporter();
     const info = await mailer.sendMail({
-      from: emailConfig.smtp?.from || '"TNGA Pulse Alert System" <no-reply@toyota-tnga.com>',
+      from: smtp.from,
       to: recipients.join(', '),
       subject,
       html: htmlContent
@@ -208,11 +235,12 @@ async function dispatchPulseEmailAlert({
 }
 
 /**
- * Sends a test email to verify SMTP configuration
+ * Sends a test email to verify SMTP configuration from .env
  */
 async function sendTestEmail(testRecipient) {
   const config = getEmailConfig();
-  const recipient = testRecipient || (config.recipients && config.recipients[0]) || 'test@plant.toyota.com';
+  const recipient = testRecipient || (config.recipients && config.recipients[0]) || process.env.TEST_EMAIL_RECIPIENT || 'test@plant.toyota.com';
+  const smtp = getSmtpCredentials();
 
   const mailer = getMailTransporter();
   const subject = '✅ [TNGA TEST] Pulse Alert System - Test Notification';
@@ -221,7 +249,7 @@ async function sendTestEmail(testRecipient) {
       <div style="background: white; padding: 24px; border-radius: 8px; border: 1px solid #e2e8f0; max-width: 500px;">
         <h3 style="color: #16a34a; margin-top:0;">✅ SMTP Connection Successful</h3>
         <p>This is a test notification from the <strong>TNGA Pulse Monitoring & Admin Portal</strong>.</p>
-        <p>Your email trigger parameters are successfully verified and ready to dispatch real-time alerts when any tool crosses its configured pulse limit.</p>
+        <p>Your email parameters configured in <code>.env</code> (Host: <strong>${smtp.host}</strong>) are successfully verified and ready to dispatch real-time alerts when any tool crosses its configured pulse limit.</p>
         <p style="font-size: 12px; color: #64748b;">Timestamp: ${new Date().toISOString()}</p>
       </div>
     </div>
@@ -229,7 +257,7 @@ async function sendTestEmail(testRecipient) {
 
   try {
     const info = await mailer.sendMail({
-      from: config.smtp?.from || '"TNGA Pulse Alert System" <no-reply@toyota-tnga.com>',
+      from: smtp.from,
       to: recipient,
       subject,
       html
@@ -248,5 +276,6 @@ function getEmailHistory() {
 module.exports = {
   dispatchPulseEmailAlert,
   sendTestEmail,
-  getEmailHistory
+  getEmailHistory,
+  getSmtpCredentials
 };
