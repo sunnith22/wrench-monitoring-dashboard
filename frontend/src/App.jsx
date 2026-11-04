@@ -108,6 +108,7 @@ export default function App() {
           <AlertsTrackerPage
             onSelectWrench={handleSelectWrench}
             onNavigateTab={setActiveTab}
+            onAlertUpdated={loadOverview}
           />
         )}
 
