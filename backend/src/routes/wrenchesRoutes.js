@@ -3,6 +3,7 @@ const router = express.Router();
 const { ALL_WRENCH_ASSETS } = require('../data/wrenchCatalog');
 const { fetchWrenchOperations } = require('../services/dataIngestionService');
 const { calculateWrenchAnalytics } = require('../services/analyticsService');
+const { getToolThreshold, getToolThresholdDetails } = require('../services/configService');
 
 /**
  * GET /api/wrenches - Master Asset Register list (73 tools)
@@ -10,7 +11,11 @@ const { calculateWrenchAnalytics } = require('../services/analyticsService');
 router.get('/', (req, res) => {
   const { assembly, sub_assembly, brand, search } = req.query;
 
-  let filtered = [...ALL_WRENCH_ASSETS];
+  let filtered = ALL_WRENCH_ASSETS.map(w => ({
+    ...w,
+    default_pulse_threshold: getToolThreshold(w.wrench_id),
+    pulse_threshold_details: getToolThresholdDetails(w.wrench_id)
+  }));
 
   if (assembly && assembly !== 'ALL') {
     filtered = filtered.filter(w => w.assembly_id === assembly || w.assembly_name === assembly);
@@ -50,19 +55,27 @@ router.get('/:wrenchId', async (req, res) => {
     const { wrenchId } = req.params;
     const { date } = req.query;
 
-    const wrench = ALL_WRENCH_ASSETS.find(w => w.wrench_id === wrenchId);
-    if (!wrench) {
+    const baseWrench = ALL_WRENCH_ASSETS.find(w => w.wrench_id === wrenchId);
+    if (!baseWrench) {
       return res.status(404).json({
         success: false,
         message: `Wrench '${wrenchId}' not found in TNGA Asset Register.`
       });
     }
 
+    // Retrieve live dynamic threshold configured by Admin
+    const activeThreshold = getToolThreshold(baseWrench.wrench_id);
+    const wrench = {
+      ...baseWrench,
+      default_pulse_threshold: activeThreshold,
+      pulse_threshold_details: getToolThresholdDetails(baseWrench.wrench_id)
+    };
+
     // Ingest tightening operations
     const rawRecords = await fetchWrenchOperations(wrench, date);
 
-    // Calculate statistical metrics
-    const analytics = calculateWrenchAnalytics(rawRecords, wrench.default_pulse_threshold);
+    // Calculate statistical metrics using the dynamic threshold
+    const analytics = calculateWrenchAnalytics(rawRecords, activeThreshold);
 
     res.json({
       success: true,

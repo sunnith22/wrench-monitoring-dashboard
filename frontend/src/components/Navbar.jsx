@@ -10,7 +10,8 @@ import {
   FileText,
   Repeat,
   MapPin,
-  RefreshCw
+  RefreshCw,
+  ShieldCheck
 } from 'lucide-react';
 
 export default function Navbar({
@@ -113,6 +114,29 @@ export default function Navbar({
             <RefreshCw size={14} style={{ animation: loading ? 'spin 1s linear infinite' : 'none' }} />
             <span>Refresh</span>
           </button>
+
+          {/* Admin Control Portal Link */}
+          <a
+            href="http://localhost:3020"
+            target="_blank"
+            rel="noreferrer"
+            className="btn btn-secondary"
+            style={{
+              padding: '6px 12px',
+              textDecoration: 'none',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+              color: '#2563eb',
+              borderColor: '#bfdbfe',
+              background: '#eff6ff',
+              fontWeight: 600
+            }}
+            title="Open Admin Portal to change pulse limits and pulling schedule"
+          >
+            <ShieldCheck size={14} />
+            <span>Admin Portal</span>
+          </a>
         </div>
       </div>
 

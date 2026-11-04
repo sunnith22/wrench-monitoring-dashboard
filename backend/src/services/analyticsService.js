@@ -113,6 +113,8 @@ function calculateWrenchAnalytics(records, thresholdMax) {
     ngCount,
     okPercentage,
     ngPercentage,
+    thresholdMax,
+    warningThreshold: Math.max(1, thresholdMax - 3),
     chartData,
     dailyAverages,
     thresholdBreaches,

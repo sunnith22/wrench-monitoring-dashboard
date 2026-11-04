@@ -10,6 +10,8 @@ const trendsRoutes = require('./src/routes/trendsRoutes');
 const toolChangeRoutes = require('./src/routes/toolChangeRoutes');
 const alertsRoutes = require('./src/routes/alertsRoutes');
 const rawRecordsRoutes = require('./src/routes/rawRecordsRoutes');
+const adminRoutes = require('./src/routes/adminRoutes');
+const { startDynamicSyncScheduler } = require('./src/services/shiftSyncWorker');
 
 const app = express();
 const PORT = process.env.PORT || 8140;
@@ -25,6 +27,7 @@ app.use('/api/trends', trendsRoutes);
 app.use('/api/tool-changes', toolChangeRoutes);
 app.use('/api/alerts', alertsRoutes);
 app.use('/api/data/records', rawRecordsRoutes);
+app.use('/api/admin', adminRoutes);
 
 // Health Endpoint
 app.get('/health', (req, res) => {
@@ -43,6 +46,8 @@ app.listen(PORT, async () => {
   console.log(`🚀 Pulse Monitoring Dashboard API running on port ${PORT}`);
   console.log(`📡 Health Check: http://localhost:${PORT}/health`);
   console.log(`🔧 Overview API: http://localhost:${PORT}/api/dashboard/overview`);
+  console.log(`⚙️ Admin API: http://localhost:${PORT}/api/admin/schedule`);
   console.log('=======================================================');
   await connectDB();
+  startDynamicSyncScheduler();
 });
