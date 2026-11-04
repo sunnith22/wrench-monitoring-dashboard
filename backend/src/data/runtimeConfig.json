@@ -42,12 +42,12 @@
       "brand": "URYU",
       "line_code": "MK1",
       "assembly_name": "Assembly 2",
-      "pulse_limit": 26,
-      "warning_limit": 23,
+      "pulse_limit": 24,
+      "warning_limit": 21,
       "target_torque": 22,
       "email_trigger_enabled": true,
-      "updated_at": "2026-11-04T02:56:11.754Z",
-      "updated_by": "Admin"
+      "updated_at": "2026-11-04T03:40:46.202Z",
+      "updated_by": "admin"
     },
     "URYU_STCam_housing_sub_assy_F005": {
       "wrench_id": "URYU_STCam_housing_sub_assy_F005",
@@ -1149,6 +1149,20 @@
     }
   },
   "auditLogs": [
+    {
+      "id": "aud_1793763646202_k6u7",
+      "action": "UPDATE_THRESHOLD",
+      "details": "Changed pulse count limit for Ex manifold stud (URYU_ST28_F016) from 26 to 24",
+      "user": "admin",
+      "timestamp": "2026-11-04T03:40:46.202Z"
+    },
+    {
+      "id": "aud_1793763535561_up41",
+      "action": "LOGIN",
+      "details": "Admin user \"admin\" logged in successfully",
+      "user": "admin",
+      "timestamp": "2026-11-04T03:38:55.561Z"
+    },
     {
       "id": "aud_1793762043145_47io",
       "action": "UPDATE_EMAIL_CONFIG",

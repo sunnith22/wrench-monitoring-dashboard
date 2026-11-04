@@ -50,19 +50,19 @@ export default function Navbar({
         gap: '16px'
       }}>
         {/* Brand */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '14px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '14px', flexShrink: 0, whiteSpace: 'nowrap' }}>
           <img
             src="/tiei-logo.png"
             alt="TIEI Logo"
             style={{
-              height: '32px',
+              height: '30px',
               width: 'auto',
               objectFit: 'contain',
               display: 'block'
             }}
           />
-          <div style={{ width: '1px', height: '24px', background: '#cbd5e1' }} />
-          <h1 style={{ fontSize: '18px', fontWeight: '800', color: 'var(--text-primary)', letterSpacing: '-0.3px', margin: 0 }}>
+          <div style={{ width: '1px', height: '22px', background: '#cbd5e1' }} />
+          <h1 style={{ fontSize: '18px', fontWeight: '800', color: 'var(--text-primary)', letterSpacing: '-0.3px', margin: 0, whiteSpace: 'nowrap' }}>
             Pulse Monitoring Dashboard
           </h1>
         </div>
