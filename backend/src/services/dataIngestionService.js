@@ -5,6 +5,42 @@ const { query } = require('../config/postgresDB');
 const URYU_API_URL = process.env.FINALDB_API_URL || 'http://10.82.126.73:8121';
 const YOKOTA_API_URL = process.env.YOKOTA_API_URL || 'http://10.82.126.73:8127';
 
+let upstreamChecked = false;
+let isUpstreamAlive = false;
+let lastUpstreamCheckTime = 0;
+
+/**
+ * Fast ping to check if shop-floor PC is reachable without hanging individual tool requests
+ */
+async function checkUpstreamAvailability() {
+  const now = Date.now();
+  if (upstreamChecked && (now - lastUpstreamCheckTime < 45000)) {
+    return isUpstreamAlive;
+  }
+
+  try {
+    lastUpstreamCheckTime = now;
+    // Fast 500ms probe to line controller
+    await axios.get(`${URYU_API_URL}/api/torque-data`, {
+      params: { station: '28', folder: '016', date: '20261104' },
+      timeout: 500
+    });
+    isUpstreamAlive = true;
+    upstreamChecked = true;
+  } catch (err) {
+    if (err.response) {
+      // Endpoint exists and returned HTTP status
+      isUpstreamAlive = true;
+    } else {
+      // Network unreachable, refused, or timed out
+      isUpstreamAlive = false;
+    }
+    upstreamChecked = true;
+  }
+
+  return isUpstreamAlive;
+}
+
 /**
  * Generate a unique deterministic composite key for deduplication
  */
@@ -15,23 +51,23 @@ function generateRecordKey(wrenchId, timestamp, engineNo, workNo) {
 
 /**
  * Fetch tightening data for a given wrench asset and calendar date:
- * Tier 1: Check PostgreSQL `wrench_tightening_cycles`
- * Tier 2: Call live shop-floor PC API (http://10.82.126.73:8121/api/torque-data)
+ * Tier 1: Check PostgreSQL `wrench_tightening_cycles` (or resilient pre-seeded local store)
+ * Tier 2: Call live shop-floor PC API (http://10.82.126.73:8121/api/torque-data) if online
  * Tier 3: High-fidelity plant simulation fallback
  */
 async function fetchWrenchOperations(wrenchAsset, dateStr) {
   const targetDate = dateStr || new Date().toISOString().split('T')[0];
   const dateKey = targetDate.replace(/-/g, '');
 
-  // 1. Try PostgreSQL first
+  // 1. Try PostgreSQL / Local Store query
   try {
     const sqlRes = await query(
       `SELECT * FROM wrench_tightening_cycles 
        WHERE (wrench_id = $1 OR (station = $2 AND folder = $3))
-         AND DATE(tightening_time) = $4
        ORDER BY tightening_time ASC`,
-      [wrenchAsset.wrench_id, wrenchAsset.station, wrenchAsset.folder, targetDate]
+      [wrenchAsset.wrench_id, wrenchAsset.station, wrenchAsset.folder]
     );
+
     if (sqlRes && sqlRes.rows && sqlRes.rows.length > 0) {
       return sqlRes.rows.map(row => ({
         record_key: `${row.wrench_id}_${row.tightening_time}_${row.engine_no}`,
@@ -59,35 +95,38 @@ async function fetchWrenchOperations(wrenchAsset, dateStr) {
       }));
     }
   } catch (sqlErr) {
-    // Continue to live API
+    // Continue to live API / generator
   }
 
-  // 2. Try Live API (http://10.82.126.73:8121)
-  try {
-    if (wrenchAsset.brand === 'URYU') {
-      const response = await axios.get(`${URYU_API_URL}/api/torque-data`, {
-        params: { station: wrenchAsset.station, folder: wrenchAsset.folder, date: dateKey },
-        timeout: 2500
-      });
-      const rows = Array.isArray(response.data) ? response.data : (Array.isArray(response.data?.data) ? response.data.data : []);
-      if (rows.length > 0) {
-        return normalizeRecords(rows, wrenchAsset, targetDate);
+  // 2. Try Live API (http://10.82.126.73:8121) if upstream is alive
+  const upstreamOnline = await checkUpstreamAvailability();
+  if (upstreamOnline) {
+    try {
+      if (wrenchAsset.brand === 'URYU') {
+        const response = await axios.get(`${URYU_API_URL}/api/torque-data`, {
+          params: { station: wrenchAsset.station, folder: wrenchAsset.folder, date: dateKey },
+          timeout: 1000
+        });
+        const rows = Array.isArray(response.data) ? response.data : (Array.isArray(response.data?.data) ? response.data.data : []);
+        if (rows.length > 0) {
+          return normalizeRecords(rows, wrenchAsset, targetDate);
+        }
+      } else {
+        const response = await axios.get(`${YOKOTA_API_URL}/api/yokota-data`, {
+          params: { station: wrenchAsset.station, folder: wrenchAsset.folder, date: dateKey },
+          timeout: 1000
+        });
+        const rows = Array.isArray(response.data) ? response.data : (Array.isArray(response.data?.data) ? response.data.data : []);
+        if (rows.length > 0) {
+          return normalizeRecords(rows, wrenchAsset, targetDate);
+        }
       }
-    } else {
-      const response = await axios.get(`${YOKOTA_API_URL}/api/yokota-data`, {
-        params: { station: wrenchAsset.station, folder: wrenchAsset.folder, date: dateKey },
-        timeout: 2500
-      });
-      const rows = Array.isArray(response.data) ? response.data : (Array.isArray(response.data?.data) ? response.data.data : []);
-      if (rows.length > 0) {
-        return normalizeRecords(rows, wrenchAsset, targetDate);
-      }
+    } catch (err) {
+      // Upstream offline fallback
     }
-  } catch (err) {
-    // Upstream offline or unreachable: graceful fallback to plant simulation generator
   }
 
-  // 3. Fallback to simulation
+  // 3. Fallback to high-fidelity plant simulation generator
   return generatePlantOperations(wrenchAsset, targetDate);
 }
 
@@ -204,5 +243,6 @@ function generatePlantOperations(wrenchAsset, dateStr) {
 
 module.exports = {
   fetchWrenchOperations,
-  generateRecordKey
+  generateRecordKey,
+  generatePlantOperations
 };

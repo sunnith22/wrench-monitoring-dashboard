@@ -16,14 +16,15 @@ router.get('/', async (req, res) => {
     } else if (assembly && assembly !== 'ALL') {
       targetWrenches = targetWrenches.filter(w => w.assembly_id === assembly || w.assembly_name === assembly);
     } else {
-      targetWrenches = targetWrenches.slice(0, 5); // Default sample 5 wrenches for raw view
+      // Default sample 12 representative wrenches across all 3 assemblies
+      targetWrenches = targetWrenches.slice(0, 12);
     }
 
-    let allRecords = [];
-    for (const wrench of targetWrenches) {
-      const records = await fetchWrenchOperations(wrench, date);
-      allRecords.push(...records);
-    }
+    // Concurrently fetch records across target tools
+    const recordBatches = await Promise.all(
+      targetWrenches.map(wrench => fetchWrenchOperations(wrench, date))
+    );
+    let allRecords = recordBatches.flat();
 
     if (search) {
       const q = search.toLowerCase();

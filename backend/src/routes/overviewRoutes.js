@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
-const { ALL_WRENCH_ASSETS, ASSEMBLIES_METADATA } = require('../data/wrenchCatalog');
+const { ALL_WRENCH_ASSETS } = require('../data/wrenchCatalog');
+const { localFallbackCycles, getPostgresStatus } = require('../config/postgresDB');
 
 // In-Memory store for active alert records
 const inMemoryAlerts = [
@@ -58,9 +59,11 @@ router.get('/', (req, res) => {
   const assy2Tools = ALL_WRENCH_ASSETS.filter(w => w.assembly_id === 'assembly-2').length;
   const assy3Tools = ALL_WRENCH_ASSETS.filter(w => w.assembly_id === 'assembly-3').length;
 
-  // OK vs NG Production Run Distribution (Shift total ~2,750 operations)
-  const totalOperations = 2774;
-  const ngOperations = 38;
+  // Calculate live dynamic counts from cycles store
+  const totalOperations = localFallbackCycles.length > 0 ? localFallbackCycles.length : 2774;
+  const ngOperations = localFallbackCycles.length > 0 
+    ? localFallbackCycles.filter(c => c.torque_status === 'NG' || c.pulse_status === 'CRITICAL').length 
+    : 38;
   const okOperations = totalOperations - ngOperations;
   const okPercentage = Number(((okOperations / totalOperations) * 100).toFixed(1));
   const ngPercentage = Number(((ngOperations / totalOperations) * 100).toFixed(1));
@@ -68,11 +71,14 @@ router.get('/', (req, res) => {
   const openAlertsCount = inMemoryAlerts.filter(a => a.status === 'OPEN').length;
   const acknowledgedAlertsCount = inMemoryAlerts.filter(a => a.status === 'ACKNOWLEDGED').length;
 
+  const pgStatus = getPostgresStatus();
+
   res.json({
     success: true,
     timestamp: new Date().toISOString(),
     last_data_update: new Date().toLocaleTimeString(),
-    data_feed_health: 'OPTIMAL (10s Polling)',
+    data_feed_health: `OPTIMAL (${pgStatus.activeSource})`,
+    database_status: pgStatus,
     kpi: {
       total_registered_wrenches: totalWrenches,
       active_wrenches: activeWrenches,
