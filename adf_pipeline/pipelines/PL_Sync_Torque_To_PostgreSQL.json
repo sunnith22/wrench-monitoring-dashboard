@@ -1,0 +1,198 @@
+{
+  "name": "PL_Sync_Torque_To_PostgreSQL",
+  "properties": {
+    "description": "Orchestrates extraction of tightening cycle telemetry from Shop-Floor PC to PostgreSQL during shift break windows",
+    "parameters": {
+      "shiftDate": {
+        "type": "string",
+        "defaultValue": "@formatDateTime(utcNow(), 'yyyyMMdd')"
+      },
+      "windowName": {
+        "type": "string",
+        "defaultValue": "Scheduled Window"
+      }
+    },
+    "variables": {
+      "stationList": {
+        "type": "Array",
+        "defaultValue": [
+          "1", "7", "17", "21", "22", "23", "26", "28", "31", "43", "45", "46", "51", "52", "53", "55", "56", "57", "58", "59", "60", "61", "62", "CHS", "BS", "HS", "SPS"
+        ]
+      },
+      "runBatchId": {
+        "type": "string"
+      }
+    },
+    "activities": [
+      {
+        "name": "SetRunBatchId",
+        "type": "SetVariable",
+        "dependsOn": [],
+        "userProperties": [],
+        "typeProperties": {
+          "variableName": "runBatchId",
+          "value": {
+            "value": "@concat('ADF_', pipeline().RunId)",
+            "type": "Expression"
+          }
+        }
+      },
+      {
+        "name": "LogSyncStart",
+        "type": "Script",
+        "dependsOn": [
+          {
+            "activity": "SetRunBatchId",
+            "dependencyConditions": ["Succeeded"]
+          }
+        ],
+        "linkedServiceName": {
+          "referenceName": "LS_PostgreSQL_Target",
+          "type": "LinkedServiceReference"
+        },
+        "typeProperties": {
+          "scripts": [
+            {
+              "type": "Query",
+              "text": {
+                "value": "@concat('INSERT INTO shift_sync_logs (sync_id, sync_source, window_name, start_time, status) VALUES (''', variables('runBatchId'), ''', ''ADF_PIPELINE'', ''', pipeline().parameters.windowName, ''', NOW(), ''RUNNING'');')",
+                "type": "Expression"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "name": "ForEachStationExtraction",
+        "type": "ForEach",
+        "dependsOn": [
+          {
+            "activity": "LogSyncStart",
+            "dependencyConditions": ["Succeeded"]
+          }
+        ],
+        "userProperties": [],
+        "typeProperties": {
+          "items": {
+            "value": "@variables('stationList')",
+            "type": "Expression"
+          },
+          "batchCount": 4,
+          "activities": [
+            {
+              "name": "CopyStationTorqueToSQL",
+              "type": "Copy",
+              "dependsOn": [],
+              "policy": {
+                "timeout": "0.00:03:00",
+                "retry": 2,
+                "retryIntervalInSeconds": 15,
+                "secureOutput": false,
+                "secureInput": false
+              },
+              "userProperties": [],
+              "typeProperties": {
+                "source": {
+                  "type": "RestSource",
+                  "httpRequestTimeout": "00:01:30",
+                  "requestInterval": "00.00:00.010",
+                  "requestMethod": "GET",
+                  "paginationRules": {
+                    "supportRFC5988": "true"
+                  }
+                },
+                "sink": {
+                  "type": "PostgreSqlSink",
+                  "writeBatchSize": 500,
+                  "writeBatchTimeout": "00:00:30"
+                },
+                "enableStaging": false,
+                "translator": {
+                  "type": "TabularTranslator",
+                  "mappings": [
+                    {
+                      "source": { "path": "$['folder']" },
+                      "sink": { "name": "folder", "type": "String" }
+                    },
+                    {
+                      "source": { "path": "$['Tightening date/time']" },
+                      "sink": { "name": "tightening_time", "type": "DateTime" }
+                    },
+                    {
+                      "source": { "path": "$['Torque']" },
+                      "sink": { "name": "torque_val", "type": "Decimal" }
+                    },
+                    {
+                      "source": { "path": "$['Angle']" },
+                      "sink": { "name": "angle_val", "type": "Decimal" }
+                    },
+                    {
+                      "source": { "path": "$['Number of pulses']" },
+                      "sink": { "name": "pulse_count", "type": "Int32" }
+                    },
+                    {
+                      "source": { "path": "$['Judgement']" },
+                      "sink": { "name": "torque_status", "type": "String" }
+                    },
+                    {
+                      "source": { "path": "$['barcode']" },
+                      "sink": { "name": "engine_no", "type": "String" }
+                    }
+                  ]
+                }
+              },
+              "inputs": [
+                {
+                  "referenceName": "DS_REST_TorqueAPI_Source",
+                  "type": "DatasetReference",
+                  "parameters": {
+                    "station": {
+                      "value": "@item()",
+                      "type": "Expression"
+                    },
+                    "dateKey": {
+                      "value": "@pipeline().parameters.shiftDate",
+                      "type": "Expression"
+                    }
+                  }
+                }
+              ],
+              "outputs": [
+                {
+                  "referenceName": "DS_PostgreSQL_Cycles_Sink",
+                  "type": "DatasetReference"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "name": "LogSyncSuccess",
+        "type": "Script",
+        "dependsOn": [
+          {
+            "activity": "ForEachStationExtraction",
+            "dependencyConditions": ["Succeeded"]
+          }
+        ],
+        "linkedServiceName": {
+          "referenceName": "LS_PostgreSQL_Target",
+          "type": "LinkedServiceReference"
+        },
+        "typeProperties": {
+          "scripts": [
+            {
+              "type": "Query",
+              "text": {
+                "value": "@concat('UPDATE shift_sync_logs SET status = ''SUCCESS'', end_time = NOW(), records_inserted = (SELECT COUNT(*) FROM wrench_tightening_cycles WHERE created_at >= NOW() - INTERVAL ''15 minutes'') WHERE sync_id = ''', variables('runBatchId'), ''';')",
+                "type": "Expression"
+              }
+            }
+          ]
+        }
+      }
+    ],
+    "annotations": ["TNGA", "ImpactWrench", "ProductionShift"]
+  }
+}

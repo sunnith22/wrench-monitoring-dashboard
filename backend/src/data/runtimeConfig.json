@@ -1133,8 +1133,6 @@
   "emailConfig": {
     "enabled": true,
     "recipients": [
-      "quality.lead@plant.toyota.com",
-      "maintenance.shift1@plant.toyota.com",
       "sunnith.g@toyota.com"
     ],
     "cooldownMinutes": 10,
@@ -1149,6 +1147,34 @@
     }
   },
   "auditLogs": [
+    {
+      "id": "aud_1793767840212_ia75",
+      "action": "LOGIN",
+      "details": "Admin user \"admin\" logged in successfully",
+      "user": "admin",
+      "timestamp": "2026-11-04T04:50:40.212Z"
+    },
+    {
+      "id": "aud_1793764681802_zq5p",
+      "action": "UPDATE_EMAIL_CONFIG",
+      "details": "Updated email alert settings (1 recipients, cooldown: 10m)",
+      "user": "admin",
+      "timestamp": "2026-11-04T03:58:01.802Z"
+    },
+    {
+      "id": "aud_1793764678652_6ja0",
+      "action": "UPDATE_EMAIL_CONFIG",
+      "details": "Updated email alert settings (3 recipients, cooldown: 10m)",
+      "user": "admin",
+      "timestamp": "2026-11-04T03:57:58.652Z"
+    },
+    {
+      "id": "aud_1793764475952_ey1c",
+      "action": "MANUAL_SYNC_TRIGGERED",
+      "details": "Manual data extraction initiated via Admin Portal",
+      "user": "admin",
+      "timestamp": "2026-11-04T03:54:35.952Z"
+    },
     {
       "id": "aud_1793763646202_k6u7",
       "action": "UPDATE_THRESHOLD",

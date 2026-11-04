@@ -2,6 +2,8 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const { connectDB, getDbStatus } = require('./src/config/db');
+const { getPostgresStatus } = require('./src/config/postgresDB');
+const { initializeTables } = require('./src/scripts/initPostgresTables');
 
 const overviewRoutes = require('./src/routes/overviewRoutes').router;
 const wrenchesRoutes = require('./src/routes/wrenchesRoutes');
@@ -36,7 +38,8 @@ app.get('/health', (req, res) => {
     system: 'Pulse Monitoring Dashboard API',
     port: PORT,
     timestamp: new Date().toISOString(),
-    database: getDbStatus()
+    database: getDbStatus(),
+    postgresql: getPostgresStatus()
   });
 });
 
@@ -49,5 +52,6 @@ app.listen(PORT, async () => {
   console.log(`⚙️ Admin API: http://localhost:${PORT}/api/admin/schedule`);
   console.log('=======================================================');
   await connectDB();
+  await initializeTables();
   startDynamicSyncScheduler();
 });

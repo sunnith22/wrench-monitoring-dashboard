@@ -1,0 +1,18 @@
+{
+  "name": "LS_REST_ShopFloor_TorqueAPI",
+  "type": "Microsoft.DataFactory/factories/linkedservices",
+  "properties": {
+    "description": "On-premises shop-floor REST API hosted on local line PC (10.82.126.73:8121)",
+    "annotations": ["TNGA", "ImpactWrench", "TIEI"],
+    "connectVia": {
+      "referenceName": "SHIR_Toyota_TIEI_Plant",
+      "type": "IntegrationRuntimeReference"
+    },
+    "type": "RestService",
+    "typeProperties": {
+      "url": "http://10.82.126.73:8121",
+      "enableServerCertificateValidation": false,
+      "authenticationType": "Anonymous"
+    }
+  }
+}
