@@ -50,25 +50,21 @@ export default function Navbar({
         gap: '16px'
       }}>
         {/* Brand */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-          <div style={{
-            width: '40px',
-            height: '40px',
-            borderRadius: '10px',
-            background: 'linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            boxShadow: '0 2px 6px rgba(37, 99, 235, 0.25)',
-            color: '#ffffff'
-          }}>
-            <Activity size={22} />
-          </div>
-          <div>
-            <h1 style={{ fontSize: '18px', fontWeight: '800', color: 'var(--text-primary)', letterSpacing: '-0.3px' }}>
-              Pulse Monitoring Dashboard
-            </h1>
-          </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '14px' }}>
+          <img
+            src="/tiei-logo.png"
+            alt="TIEI Logo"
+            style={{
+              height: '32px',
+              width: 'auto',
+              objectFit: 'contain',
+              display: 'block'
+            }}
+          />
+          <div style={{ width: '1px', height: '24px', background: '#cbd5e1' }} />
+          <h1 style={{ fontSize: '18px', fontWeight: '800', color: 'var(--text-primary)', letterSpacing: '-0.3px', margin: 0 }}>
+            Pulse Monitoring Dashboard
+          </h1>
         </div>
 
         {/* Global Wrench Search (Section 2.4) */}

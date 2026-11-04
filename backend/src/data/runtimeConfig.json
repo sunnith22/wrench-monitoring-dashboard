@@ -1150,6 +1150,34 @@
   },
   "auditLogs": [
     {
+      "id": "aud_1793762043145_47io",
+      "action": "UPDATE_EMAIL_CONFIG",
+      "details": "Updated email alert settings (3 recipients, cooldown: 10m)",
+      "user": "admin",
+      "timestamp": "2026-11-04T03:14:03.145Z"
+    },
+    {
+      "id": "aud_1793761987502_iip7",
+      "action": "LOGIN",
+      "details": "Admin user \"admin\" logged in successfully",
+      "user": "admin",
+      "timestamp": "2026-11-04T03:13:07.502Z"
+    },
+    {
+      "id": "aud_1793761971491_1t6q",
+      "action": "LOGIN",
+      "details": "Admin user \"admin\" logged in successfully",
+      "user": "admin",
+      "timestamp": "2026-11-04T03:12:51.491Z"
+    },
+    {
+      "id": "aud_1793761946533_syc8",
+      "action": "LOGIN",
+      "details": "Admin user \"admin\" logged in successfully",
+      "user": "admin",
+      "timestamp": "2026-11-04T03:12:26.533Z"
+    },
+    {
       "id": "aud_1793761631614_txvu",
       "action": "LOGIN",
       "details": "Admin user \"admin\" logged in successfully",
