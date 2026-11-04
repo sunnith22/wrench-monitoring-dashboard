@@ -113,7 +113,7 @@ export default function Navbar({
 
           {/* Admin Control Portal Link */}
           <a
-            href="http://localhost:3020"
+            href={typeof window !== 'undefined' ? `${window.location.protocol}//${window.location.hostname}:3020` : 'http://localhost:3020'}
             target="_blank"
             rel="noreferrer"
             className="btn btn-secondary"
