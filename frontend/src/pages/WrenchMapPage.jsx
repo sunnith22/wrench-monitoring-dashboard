@@ -27,7 +27,7 @@ export default function WrenchMapPage({ onSelectWrench, onNavigateTab }) {
               Wrench Map & Master Asset Register (Section 2.8)
             </h2>
             <p style={{ fontSize: '13px', color: 'var(--text-muted)' }}>
-              Central register of all 73 impact wrenches across Assembly 1, 2, and 3 with controller IPs and calibration dates.
+              Central register of all 73 impact wrenches across Assembly 1, 2, and 3.
             </p>
           </div>
 
@@ -42,7 +42,7 @@ export default function WrenchMapPage({ onSelectWrench, onNavigateTab }) {
             <Search size={15} style={{ position: 'absolute', left: '12px', top: '12px', color: 'var(--text-muted)' }} />
             <input
               type="text"
-              placeholder="Search by ID, tool, serial or IP..."
+              placeholder="Search by ID, tool name, station or serial..."
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
               className="form-input"
@@ -78,8 +78,8 @@ export default function WrenchMapPage({ onSelectWrench, onNavigateTab }) {
       </div>
 
       {/* 2. Asset Register Table */}
-      <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
-        <table className="data-table">
+      <div className="card" style={{ padding: 0, overflowX: 'auto', WebkitOverflowScrolling: 'touch' }}>
+        <table className="data-table" style={{ width: '100%', minWidth: '980px' }}>
           <thead>
             <tr>
               <th>Wrench ID</th>
@@ -88,12 +88,11 @@ export default function WrenchMapPage({ onSelectWrench, onNavigateTab }) {
               <th>Sub-Assembly</th>
               <th>Station / Folder</th>
               <th>Brand</th>
-              <th>Controller IP</th>
               <th>Tool Serial</th>
               <th>Pulse Limit</th>
               <th>Target Torque</th>
               <th>Accumulated Pulses</th>
-              <th>Actions</th>
+              <th style={{ textAlign: 'center' }}>Actions</th>
             </tr>
           </thead>
           <tbody>
@@ -126,21 +125,22 @@ export default function WrenchMapPage({ onSelectWrench, onNavigateTab }) {
                     {tool.brand}
                   </span>
                 </td>
-                <td style={{ fontFamily: 'monospace', fontSize: '12px' }}>{tool.controller_ip}</td>
                 <td style={{ fontFamily: 'monospace', fontSize: '12px' }}>{tool.tool_serial}</td>
                 <td><strong style={{ color: 'var(--accent-red-text)' }}>{tool.default_pulse_threshold} pulses</strong></td>
                 <td><strong>{tool.approved_torque_target} N·m</strong></td>
                 <td>{tool.accumulated_pulses.toLocaleString()}</td>
-                <td>
+                <td style={{ textAlign: 'center' }}>
                   <button
                     onClick={() => {
                       onSelectWrench(tool.wrench_id);
                       onNavigateTab('wrench-analysis');
                     }}
                     className="btn btn-secondary"
-                    style={{ padding: '3px 8px', fontSize: '11px' }}
+                    style={{ padding: '4px 10px', fontSize: '11px', display: 'inline-flex', alignItems: 'center', gap: '4px' }}
+                    title="Open deep-dive telemetry analysis for this wrench"
                   >
-                    Analyze
+                    <span>Analyze</span>
+                    <ArrowRight size={12} />
                   </button>
                 </td>
               </tr>
