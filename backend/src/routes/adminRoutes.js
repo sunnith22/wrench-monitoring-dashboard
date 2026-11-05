@@ -151,7 +151,7 @@ router.get('/thresholds', (req, res) => {
 router.put('/thresholds/:wrenchId', requireAdminAuth, (req, res) => {
   try {
     const { wrenchId } = req.params;
-    const { pulse_limit, warning_limit, email_trigger_enabled } = req.body;
+    const { pulse_limit, warning_limit, email_trigger_enabled, target_torque, torque_min, torque_max } = req.body;
 
     if (pulse_limit === undefined) {
       return res.status(400).json({ success: false, message: 'pulse_limit is required' });
@@ -159,7 +159,7 @@ router.put('/thresholds/:wrenchId', requireAdminAuth, (req, res) => {
 
     const updated = configService.updateToolThreshold(
       wrenchId,
-      { pulse_limit, warning_limit, email_trigger_enabled },
+      { pulse_limit, warning_limit, email_trigger_enabled, target_torque, torque_min, torque_max },
       req.adminUser
     );
 

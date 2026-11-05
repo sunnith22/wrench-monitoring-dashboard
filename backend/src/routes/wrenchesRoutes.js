@@ -65,10 +65,14 @@ router.get('/:wrenchId', async (req, res) => {
 
     // Retrieve live dynamic threshold configured by Admin
     const activeThreshold = getToolThreshold(baseWrench.wrench_id);
+    const thresholdDetails = getToolThresholdDetails(baseWrench.wrench_id);
     const wrench = {
       ...baseWrench,
       default_pulse_threshold: activeThreshold,
-      pulse_threshold_details: getToolThresholdDetails(baseWrench.wrench_id)
+      pulse_threshold_details: thresholdDetails,
+      approved_torque_target: thresholdDetails?.target_torque ?? baseWrench.approved_torque_target,
+      approved_torque_min: thresholdDetails?.torque_min ?? baseWrench.approved_torque_min,
+      approved_torque_max: thresholdDetails?.torque_max ?? baseWrench.approved_torque_max
     };
 
     // Ingest tightening operations

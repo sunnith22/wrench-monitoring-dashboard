@@ -44,9 +44,11 @@
       "assembly_name": "Assembly 2",
       "pulse_limit": 24,
       "warning_limit": 21,
-      "target_torque": 22,
+      "target_torque": 8.0,
+      "torque_min": 6.5,
+      "torque_max": 9.5,
       "email_trigger_enabled": true,
-      "updated_at": "2026-11-04T03:40:46.202Z",
+      "updated_at": "2026-11-05T08:15:00.000Z",
       "updated_by": "admin"
     },
     "URYU_STCam_housing_sub_assy_F005": {

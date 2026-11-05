@@ -31,6 +31,8 @@ export default function WrenchAnalysisPage({ wrenchId, onSelectWrench }) {
   const [selectedDate, setSelectedDate] = useState(() => new Date().toISOString().split('T')[0]);
   const [wrenchData, setWrenchData] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [filterAborts, setFilterAborts] = useState(false);
+  const [showLine, setShowLine] = useState(true);
 
   // Load wrenches catalog for selector
   useEffect(() => {
@@ -62,6 +64,11 @@ export default function WrenchAnalysisPage({ wrenchId, onSelectWrench }) {
   const thresholdMax = wrench?.default_pulse_threshold || 25;
   const chartData = analytics?.chartData || [];
   const dailyAverages = analytics?.dailyAverages || [];
+
+  const displayedChartData = React.useMemo(() => {
+    if (!filterAborts) return chartData;
+    return chartData.filter(d => (d.pulse_count || 0) >= 4);
+  }, [chartData, filterAborts]);
 
   return (
     <div>
@@ -247,26 +254,71 @@ export default function WrenchAnalysisPage({ wrenchId, onSelectWrench }) {
 
           {/* 3. Raw Pulse Count Scatter Chart (Section 2.5 A) */}
           <div className="card" style={{ marginBottom: '22px' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px', flexWrap: 'wrap', gap: '10px' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                 <Activity size={18} color="var(--accent-blue)" />
                 <h3 style={{ fontSize: '15px', fontWeight: 700, color: 'var(--text-primary)' }}>
                   Individual Wrench Raw Pulse Count vs Time
                 </h3>
               </div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '14px', fontSize: '12px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '12px', fontSize: '12px', flexWrap: 'wrap' }}>
                 <span style={{ color: 'var(--accent-blue)', fontWeight: 600 }}>● OK Pulse</span>
                 <span style={{ color: 'var(--accent-red-text)', fontWeight: 600 }}>● Threshold Breach</span>
                 <span style={{ color: 'var(--accent-red-text)' }}>--- Limit ({thresholdMax})</span>
+
+                {/* View Controls: Filter Aborts & Line Toggle */}
+                <button
+                  type="button"
+                  onClick={() => setFilterAborts(prev => !prev)}
+                  style={{
+                    padding: '4px 10px',
+                    borderRadius: '6px',
+                    fontSize: '11px',
+                    fontWeight: 600,
+                    cursor: 'pointer',
+                    border: filterAborts ? '1px solid var(--accent-blue)' : '1px solid var(--border-color)',
+                    background: filterAborts ? 'var(--accent-blue-light)' : 'var(--bg-subtle)',
+                    color: filterAborts ? 'var(--accent-blue)' : 'var(--text-secondary)',
+                    transition: 'all 0.15s ease'
+                  }}
+                  title="Filter out quick trigger taps (<4 pulses) to see the true tightening distribution"
+                >
+                  {filterAborts ? '✓ Excluded False Starts (<4p)' : 'Filter False Starts (<4p)'}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setShowLine(prev => !prev)}
+                  style={{
+                    padding: '4px 10px',
+                    borderRadius: '6px',
+                    fontSize: '11px',
+                    fontWeight: 600,
+                    cursor: 'pointer',
+                    border: '1px solid var(--border-color)',
+                    background: !showLine ? 'var(--accent-blue-light)' : 'var(--bg-subtle)',
+                    color: !showLine ? 'var(--accent-blue)' : 'var(--text-secondary)',
+                    transition: 'all 0.15s ease'
+                  }}
+                  title="Toggle between connected line and pure scatter points"
+                >
+                  {showLine ? 'Line View' : 'Scatter Points Only'}
+                </button>
               </div>
             </div>
 
             <div style={{ width: '100%', height: '300px' }}>
               <ResponsiveContainer width="100%" height="100%">
-                <ComposedChart data={chartData} margin={{ top: 10, right: 30, left: 0, bottom: 20 }}>
+                <ComposedChart data={displayedChartData} margin={{ top: 10, right: 30, left: 0, bottom: 20 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
                   <XAxis dataKey="time" stroke="#94a3b8" fontSize={11} tickLine={false} dy={8} />
-                  <YAxis stroke="#94a3b8" fontSize={11} domain={[0, thresholdMax + 8]} tickLine={false} dx={-4} />
+                  <YAxis
+                    stroke="#94a3b8"
+                    fontSize={11}
+                    domain={[0, (dataMax) => Math.max(thresholdMax + 6, Math.ceil((dataMax || 30) * 1.15))]}
+                    tickLine={false}
+                    dx={-4}
+                  />
                   <Tooltip
                     content={({ active, payload }) => {
                       if (active && payload && payload.length) {
@@ -287,8 +339,9 @@ export default function WrenchAnalysisPage({ wrenchId, onSelectWrench }) {
                   <Line
                     type="monotone"
                     dataKey="pulse_count"
-                    stroke="#2563eb"
-                    strokeWidth={2}
+                    stroke={showLine ? "#3b82f6" : "transparent"}
+                    strokeWidth={showLine ? 1.5 : 0}
+                    isAnimationActive={false}
                     dot={(props) => {
                       const { cx, cy, payload } = props;
                       if (!cx || !cy) return null;
@@ -303,11 +356,11 @@ export default function WrenchAnalysisPage({ wrenchId, onSelectWrench }) {
 
           {/* 3B. Torque vs Time Graph (Section 2.5 E) */}
           <TorqueChart
-            chartData={chartData}
+            chartData={displayedChartData}
             toolName={wrench?.tool_name || ''}
-            targetTorque={wrench?.approved_torque_target || 20.0}
-            torqueMin={wrench?.approved_torque_min || 17.0}
-            torqueMax={wrench?.approved_torque_max || 23.0}
+            targetTorque={wrench?.approved_torque_target || 8.0}
+            torqueMin={wrench?.approved_torque_min || 6.5}
+            torqueMax={wrench?.approved_torque_max || 9.5}
           />
 
           {/* 4. Daily Average Pulse Count Summary (Section 2.5 C) */}

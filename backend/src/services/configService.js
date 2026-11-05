@@ -218,7 +218,7 @@ function getAllThresholds() {
   return Object.values(config.thresholds || {});
 }
 
-function updateToolThreshold(wrenchId, { pulse_limit, warning_limit, email_trigger_enabled }, user = 'Admin') {
+function updateToolThreshold(wrenchId, { pulse_limit, warning_limit, email_trigger_enabled, target_torque, torque_min, torque_max }, user = 'Admin') {
   const config = loadConfig();
   if (!config.thresholds[wrenchId]) {
     config.thresholds[wrenchId] = getToolThresholdDetails(wrenchId);
@@ -241,11 +241,21 @@ function updateToolThreshold(wrenchId, { pulse_limit, warning_limit, email_trigg
     config.thresholds[wrenchId].email_trigger_enabled = Boolean(email_trigger_enabled);
   }
 
+  if (target_torque !== undefined && !isNaN(parseFloat(target_torque))) {
+    config.thresholds[wrenchId].target_torque = parseFloat(target_torque);
+  }
+  if (torque_min !== undefined && !isNaN(parseFloat(torque_min))) {
+    config.thresholds[wrenchId].torque_min = parseFloat(torque_min);
+  }
+  if (torque_max !== undefined && !isNaN(parseFloat(torque_max))) {
+    config.thresholds[wrenchId].torque_max = parseFloat(torque_max);
+  }
+
   config.thresholds[wrenchId].updated_at = new Date().toISOString();
   config.thresholds[wrenchId].updated_by = user;
 
   const toolName = config.thresholds[wrenchId].tool_name || wrenchId;
-  recordAudit('UPDATE_THRESHOLD', `Changed pulse count limit for ${toolName} (${wrenchId}) from ${oldLimit} to ${newLimit}`, user);
+  recordAudit('UPDATE_THRESHOLD', `Changed parameters for ${toolName} (${wrenchId}): pulse limit ${oldLimit} -> ${newLimit}${target_torque ? `, target torque -> ${target_torque} N·m` : ''}`, user);
   saveConfigToDisk();
 
   return config.thresholds[wrenchId];

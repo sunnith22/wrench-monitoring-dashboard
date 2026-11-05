@@ -4,7 +4,7 @@
  */
 
 const RAW_URYU_TOOLS = [
-  { contr_no: "1", station: "28", folder: "016", tool_name: "Ex manifold stud", line: "MK1", defaultThreshold: 25, targetTorque: 22.0, torqueMin: 18.0, torqueMax: 26.0 },
+  { contr_no: "1", station: "28", folder: "016", tool_name: "Ex manifold stud", line: "MK1", defaultThreshold: 25, targetTorque: 8.0, torqueMin: 6.5, torqueMax: 9.5 },
   { contr_no: "2", station: "Cam housing sub assy", folder: "005", tool_name: "Cam cap bolt", line: "CHS", defaultThreshold: 22, targetTorque: 14.5, torqueMin: 12.0, torqueMax: 17.0 },
   { contr_no: "3", station: "Cam housing sub assy", folder: "006", tool_name: "D4 lifter guide", line: "CHS", defaultThreshold: 20, targetTorque: 10.0, torqueMin: 8.5, torqueMax: 11.5 },
   { contr_no: "4", station: "Block sub assy", folder: "007", tool_name: "Oil jet bolt (Nozzle No.1)", line: "BS", defaultThreshold: 24, targetTorque: 18.0, torqueMin: 15.0, torqueMax: 21.0 },
