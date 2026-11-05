@@ -152,11 +152,38 @@ async function fetchWrenchOperations(wrenchAsset, dateStr) {
       }));
     }
   } catch (sqlErr) {
-    // Fall through to generator
+    // Continue
   }
 
-  // 3. Fallback to plant simulation generator
-  return generatePlantOperations(wrenchAsset, targetDate);
+  // 3. Check cached live records in local store
+  const cached = localFallbackCycles.filter(c => c.wrench_id === wrenchAsset.wrench_id && c.tightening_time && c.tightening_time.startsWith(targetDate));
+  if (cached.length > 0) {
+    return cached.map((c, idx) => ({
+      record_key: `LIVE_${c.wrench_id}_${c.tightening_time}_${idx}`,
+      wrench_id: c.wrench_id,
+      tool_name: c.tool_name,
+      assembly_name: wrenchAsset.assembly_name,
+      sub_assembly_name: wrenchAsset.sub_assembly_name,
+      station: c.station,
+      folder: c.folder,
+      brand: wrenchAsset.brand,
+      timestamp: c.tightening_time,
+      reception_timestamp: c.reception_time,
+      work_no: '1',
+      engine_number: c.engine_no,
+      pulse_count: c.pulse_count,
+      torque: c.torque_val,
+      torque_unit: 'N·m',
+      angle: c.angle_val,
+      angle_unit: 'deg',
+      tightening_time: 1.45,
+      judgement: c.torque_status || 'OK',
+      import_status: 'LIVE_SHOP_FLOOR'
+    }));
+  }
+
+  // If no live operations logged yet for this tool today, return empty array (NO FAKE SIMULATION)
+  return [];
 }
 
 /**

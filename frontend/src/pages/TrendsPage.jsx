@@ -66,8 +66,8 @@ export default function TrendsPage() {
 
   const dailyPoints = trendData?.daily_points || [];
   const threshold = trendData?.threshold || 25;
-  const toolChangeDay = trendData?.tool_change_day || 5;
-  const alertDay = trendData?.alert_day || 4;
+  const toolChangeDay = trendData?.tool_change_day || null;
+  const alertDay = trendData?.alert_day || null;
 
   // Custom Chart Dot component to draw Alert point and Tool Change point
   const CustomDailyDot = (props) => {
@@ -386,15 +386,19 @@ export default function TrendsPage() {
                   <span style={{ fontWeight: 600 }}>Daily Avg Pulse Count</span>
                 </div>
 
-                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                  <span style={{ width: '12px', height: '12px', borderRadius: '50%', background: '#ef4444' }} />
-                  <span style={{ color: '#b91c1c', fontWeight: 700 }}>Increasing Trend Alert (Day {alertDay})</span>
-                </div>
+                {alertDay && (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <span style={{ width: '12px', height: '12px', borderRadius: '50%', background: '#ef4444' }} />
+                    <span style={{ color: '#b91c1c', fontWeight: 700 }}>Increasing Trend Alert (Day {alertDay})</span>
+                  </div>
+                )}
 
-                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                  <span style={{ width: '12px', height: '12px', borderRadius: '50%', background: '#10b981' }} />
-                  <span style={{ color: '#047857', fontWeight: 700 }}>Tool Changed (Day {toolChangeDay})</span>
-                </div>
+                {toolChangeDay && (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <span style={{ width: '12px', height: '12px', borderRadius: '50%', background: '#10b981' }} />
+                    <span style={{ color: '#047857', fontWeight: 700 }}>Tool Changed (Day {toolChangeDay})</span>
+                  </div>
+                )}
 
                 <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                   <span style={{ width: '16px', height: '2px', background: '#ef4444', borderTop: '2px dashed #ef4444' }} />
@@ -415,15 +419,15 @@ export default function TrendsPage() {
                   </defs>
                   <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
                   
-                  {/* X-Axis: Days (1, 2, 3, 4, 5, 6, 7, 8) as in user's sketch */}
+                  {/* X-Axis: Days */}
                   <XAxis
                     dataKey="day_label"
                     stroke="#64748b"
-                    fontSize={12}
+                    fontSize={11}
                     fontWeight={600}
                     tickLine={false}
                     dy={10}
-                    label={{ value: 'Days', position: 'insideBottom', offset: -16, fill: '#0f172a', fontWeight: 700, fontSize: 13 }}
+                    label={{ value: 'Operating Days', position: 'insideBottom', offset: -16, fill: '#0f172a', fontWeight: 700, fontSize: 13 }}
                   />
 
                   {/* Y-Axis: Avg pulse count per day */}
@@ -432,7 +436,7 @@ export default function TrendsPage() {
                     fontSize={11}
                     tickLine={false}
                     dx={-6}
-                    domain={[12, threshold + 6]}
+                    domain={[0, (dataMax) => Math.max(threshold + 4, Math.ceil((dataMax || threshold) * 1.15))]}
                     label={{ value: 'Avg pulse count per day', angle: -90, position: 'insideLeft', fill: '#0f172a', fontWeight: 700, fontSize: 13 }}
                   />
 
@@ -453,35 +457,39 @@ export default function TrendsPage() {
                     }}
                   />
 
-                  {/* Tool Change Vertical Reference Line (Day 5 peak in sketch) */}
-                  <ReferenceLine
-                    x={`Day ${toolChangeDay}`}
-                    stroke="#10b981"
-                    strokeDasharray="4 4"
-                    strokeWidth={2}
-                    label={{
-                      value: '🔧 Tool Changed',
-                      fill: '#047857',
-                      position: 'insideTopLeft',
-                      fontSize: 12,
-                      fontWeight: 800
-                    }}
-                  />
+                  {/* Tool Change Vertical Reference Line (only if real tool change exists) */}
+                  {toolChangeDay && (
+                    <ReferenceLine
+                      x={`Day ${toolChangeDay}`}
+                      stroke="#10b981"
+                      strokeDasharray="4 4"
+                      strokeWidth={2}
+                      label={{
+                        value: '🔧 Tool Changed',
+                        fill: '#047857',
+                        position: 'insideTopLeft',
+                        fontSize: 12,
+                        fontWeight: 800
+                      }}
+                    />
+                  )}
 
-                  {/* Increasing Trend Alert Vertical Reference Line (Day 4 in sketch) */}
-                  <ReferenceLine
-                    x={`Day ${alertDay}`}
-                    stroke="#ef4444"
-                    strokeDasharray="3 3"
-                    strokeWidth={1.5}
-                    label={{
-                      value: '⚠️ Increasing trend alert',
-                      fill: '#b91c1c',
-                      position: 'insideTopRight',
-                      fontSize: 11,
-                      fontWeight: 700
-                    }}
-                  />
+                  {/* Increasing Trend Alert Vertical Reference Line (only if real alert exists) */}
+                  {alertDay && (
+                    <ReferenceLine
+                      x={`Day ${alertDay}`}
+                      stroke="#ef4444"
+                      strokeDasharray="3 3"
+                      strokeWidth={1.5}
+                      label={{
+                        value: '⚠️ Increasing trend alert',
+                        fill: '#b91c1c',
+                        position: 'insideTopRight',
+                        fontSize: 11,
+                        fontWeight: 700
+                      }}
+                    />
+                  )}
 
                   {/* Area fill under curve */}
                   <Area

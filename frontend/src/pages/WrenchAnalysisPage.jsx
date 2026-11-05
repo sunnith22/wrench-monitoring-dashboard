@@ -41,7 +41,6 @@ export default function WrenchAnalysisPage({ wrenchId, onSelectWrench }) {
   const [showLine, setShowLine] = useState(true);
   const [pulseStartIndex, setPulseStartIndex] = useState(0);
   const [pulseEndIndex, setPulseEndIndex] = useState(undefined);
-  const [pulseExpanded, setPulseExpanded] = useState(false);
 
   // Load wrenches catalog for selector
   useEffect(() => {
@@ -441,21 +440,10 @@ export default function WrenchAnalysisPage({ wrenchId, onSelectWrench }) {
                 >
                   {showLine ? 'Line View' : 'Scatter Points Only'}
                 </button>
-
-                <button
-                  type="button"
-                  onClick={() => setPulseExpanded(prev => !prev)}
-                  className="btn btn-secondary"
-                  style={{ padding: '3px 8px', fontSize: '11px', height: '26px', display: 'flex', alignItems: 'center', gap: '4px' }}
-                  title="Expand or collapse chart height"
-                >
-                  {pulseExpanded ? <Minimize2 size={13} /> : <Maximize2 size={13} />}
-                  <span>{pulseExpanded ? 'Collapse' : 'Expand Height (450px)'}</span>
-                </button>
               </div>
             </div>
 
-            <div style={{ width: '100%', height: pulseExpanded ? '450px' : '320px', transition: 'height 0.2s ease' }}>
+            <div style={{ width: '100%', height: '340px' }}>
               <ResponsiveContainer width="100%" height="100%">
                 <ComposedChart data={displayedChartData} margin={{ top: 10, right: 30, left: 0, bottom: 10 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />

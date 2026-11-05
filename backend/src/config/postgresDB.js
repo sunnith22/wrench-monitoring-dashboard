@@ -17,69 +17,12 @@ const localFallbackCycles = [];
 const localFallbackSyncLogs = [];
 
 /**
- * Pre-seed the resilient local store with realistic operational cycles for all 73 tools
- * Ensures the dashboard is immediately rich with data and graphs out-of-the-box.
+ * Local In-Memory Live Store.
+ * Strictly holds genuine shop-floor telemetry from line PC (http://10.82.126.73:8121).
+ * NO dummy or pre-seeded data.
  */
 function seedLocalFallbackStore() {
-  if (localFallbackCycles.length > 0) return;
-
-  const todayStr = new Date().toISOString().split('T')[0];
-  const targetTools = ALL_WRENCH_ASSETS || [];
-
-  for (const tool of targetTools) {
-    const cycleCount = 38;
-    const baseThreshold = tool.default_pulse_threshold || 24;
-    const nominalMean = baseThreshold - 4.5;
-    const targetTorque = tool.approved_torque_target || 22.0;
-
-    for (let i = 0; i < cycleCount; i++) {
-      const hour = Math.floor(8 + (i * 12) / 60);
-      const minute = Math.floor((i * 12) % 60);
-      const second = Math.floor((i * 37) % 60);
-      const timeStr = `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}:${String(second).padStart(2, '0')}`;
-      const timestamp = `${todayStr} ${timeStr}`;
-      const engineNo = `NG60${200 + i}`;
-      const workNo = "1";
-
-      let pulseCount;
-      if (i === 16) {
-        pulseCount = baseThreshold + 4; // Spike
-      } else if (i === 31) {
-        pulseCount = baseThreshold + 2; // Warning
-      } else {
-        const variation = Math.round((Math.sin(i / 3) * 1.8) + (Math.random() * 2.2 - 1.1));
-        pulseCount = Math.max(12, Math.round(nominalMean + variation));
-      }
-
-      const torque = Number((targetTorque + (Math.sin(i / 2) * 0.8) + (Math.random() * 0.6 - 0.3)).toFixed(2));
-      const angle = Number((45.0 + (pulseCount * 1.2) + (Math.random() * 3.0 - 1.5)).toFixed(1));
-      const duration = Number(((tool.tightening_time_target || 1.45) + (pulseCount > baseThreshold ? 0.45 : (Math.random() * 0.2 - 0.1))).toFixed(2));
-      const judgement = pulseCount > baseThreshold ? 'NG' : 'OK';
-      const pulseStatus = pulseCount > baseThreshold ? 'CRITICAL' : (pulseCount >= baseThreshold - 2 ? 'WARNING' : 'NORMAL');
-
-      localFallbackCycles.push({
-        id: localFallbackCycles.length + 1,
-        wrench_id: tool.wrench_id,
-        tool_name: tool.tool_name,
-        station: tool.station,
-        line: tool.line || 'MK1',
-        engine_no: engineNo,
-        tightening_time: timestamp,
-        reception_time: timestamp,
-        torque_val: torque,
-        torque_status: judgement,
-        angle_val: angle,
-        angle_status: 'OK',
-        pulse_count: pulseCount,
-        pulse_status: pulseStatus,
-        cycle_counter: i + 1,
-        folder: tool.folder,
-        created_at: new Date().toISOString()
-      });
-    }
-  }
-
-  console.log(`💾 [Resilient Store] Initialized with ${localFallbackCycles.length} operational cycles across ${targetTools.length} tools.`);
+  console.log(`💾 [Live Telemetry Store] Ready. Capturing genuine shop-floor cycles from line PC.`);
 }
 
 // Seed store immediately

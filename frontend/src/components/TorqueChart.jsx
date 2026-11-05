@@ -22,7 +22,6 @@ export default function TorqueChart({
 }) {
   const [startIndex, setStartIndex] = useState(0);
   const [endIndex, setEndIndex] = useState(undefined);
-  const [expanded, setExpanded] = useState(false);
   const [showLine, setShowLine] = useState(true);
 
   // Keep brush indices updated when chartData changes
@@ -296,21 +295,10 @@ export default function TorqueChart({
           >
             {showLine ? 'Continuous Line' : 'Points Only'}
           </button>
-
-          <button
-            type="button"
-            onClick={() => setExpanded(prev => !prev)}
-            className="btn btn-secondary"
-            style={{ padding: '3px 8px', fontSize: '11px', height: '26px', display: 'flex', alignItems: 'center', gap: '4px' }}
-            title="Expand or collapse chart height"
-          >
-            {expanded ? <Minimize2 size={13} /> : <Maximize2 size={13} />}
-            <span>{expanded ? 'Collapse' : 'Expand Height (450px)'}</span>
-          </button>
         </div>
       </div>
 
-      <div style={{ width: '100%', height: expanded ? '450px' : '320px', transition: 'height 0.2s ease' }}>
+      <div style={{ width: '100%', height: '340px' }}>
         <ResponsiveContainer width="100%" height="100%">
           <ComposedChart data={chartData} margin={{ top: 10, right: 30, left: 0, bottom: 10 }}>
             <defs>
