@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   ResponsiveContainer,
   ComposedChart,
@@ -8,9 +8,10 @@ import {
   YAxis,
   CartesianGrid,
   Tooltip,
-  ReferenceLine
+  ReferenceLine,
+  Brush
 } from 'recharts';
-import { Gauge } from 'lucide-react';
+import { Gauge, ZoomIn, ZoomOut, Maximize2, Minimize2, RotateCcw } from 'lucide-react';
 
 export default function TorqueChart({
   chartData = [],
@@ -19,6 +20,51 @@ export default function TorqueChart({
   torqueMin = 17.0,
   torqueMax = 23.0
 }) {
+  const [startIndex, setStartIndex] = useState(0);
+  const [endIndex, setEndIndex] = useState(undefined);
+  const [expanded, setExpanded] = useState(false);
+  const [showLine, setShowLine] = useState(true);
+
+  // Keep brush indices updated when chartData changes
+  useEffect(() => {
+    if (chartData && chartData.length > 0) {
+      setStartIndex(0);
+      setEndIndex(chartData.length - 1);
+    }
+  }, [chartData.length]);
+
+  const handleZoomIn = () => {
+    const total = chartData.length;
+    if (total <= 6) return;
+    const start = startIndex ?? 0;
+    const end = endIndex ?? (total - 1);
+    const span = end - start;
+    if (span <= 6) return;
+    const step = Math.max(2, Math.floor(span / 4));
+    setStartIndex(Math.min(start + step, end - 5));
+    setEndIndex(Math.max(end - step, start + 5));
+  };
+
+  const handleZoomOut = () => {
+    const total = chartData.length;
+    const start = startIndex ?? 0;
+    const end = endIndex ?? (total - 1);
+    const span = end - start;
+    const step = Math.max(2, Math.floor(span / 2));
+    setStartIndex(Math.max(0, start - step));
+    setEndIndex(Math.min(total - 1, end + step));
+  };
+
+  const handleZoomPreset = (count) => {
+    const total = chartData.length;
+    if (!count || total <= count) {
+      setStartIndex(0);
+      setEndIndex(total - 1);
+    } else {
+      setStartIndex(Math.max(0, total - count));
+      setEndIndex(total - 1);
+    }
+  };
   // Extract torque numbers
   const torqueValues = chartData
     .map(d => parseFloat(d.torque))
@@ -118,7 +164,7 @@ export default function TorqueChart({
 
   return (
     <div className="card" style={{ marginBottom: '22px' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px', flexWrap: 'wrap', gap: '10px' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px', flexWrap: 'wrap', gap: '10px' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
           <Gauge size={18} color="var(--accent-cyan)" />
           <h3 style={{ fontSize: '15px', fontWeight: 700, color: 'var(--text-primary)' }}>
@@ -148,9 +194,125 @@ export default function TorqueChart({
         </div>
       </div>
 
-      <div style={{ width: '100%', height: '320px' }}>
+      {/* Interactive Zoom Toolbar for Torque Chart */}
+      <div style={{
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        flexWrap: 'wrap',
+        gap: '8px',
+        padding: '8px 12px',
+        background: 'var(--bg-subtle)',
+        borderRadius: '8px',
+        marginBottom: '14px',
+        fontSize: '12px'
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
+          <span style={{ fontWeight: 700, color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: '4px' }}>
+            <ZoomIn size={14} color="var(--accent-cyan)" /> Zoom:
+          </span>
+          <button
+            type="button"
+            onClick={() => handleZoomPreset(null)}
+            className="btn btn-secondary"
+            style={{ padding: '3px 8px', fontSize: '11px', height: '26px' }}
+            title="Show all torque operations across shift"
+          >
+            All ({chartData.length})
+          </button>
+          <button
+            type="button"
+            onClick={() => handleZoomPreset(50)}
+            className="btn btn-secondary"
+            style={{ padding: '3px 8px', fontSize: '11px', height: '26px' }}
+            title="Zoom into the last 50 cycles"
+          >
+            Last 50
+          </button>
+          <button
+            type="button"
+            onClick={() => handleZoomPreset(20)}
+            className="btn btn-secondary"
+            style={{ padding: '3px 8px', fontSize: '11px', height: '26px' }}
+            title="Zoom into the last 20 operations"
+          >
+            Last 20
+          </button>
+          <button
+            type="button"
+            onClick={() => handleZoomPreset(10)}
+            className="btn btn-secondary"
+            style={{ padding: '3px 8px', fontSize: '11px', height: '26px' }}
+            title="Zoom into the last 10 operations for close-up detail"
+          >
+            Last 10 (Detail)
+          </button>
+
+          <span style={{ width: '1px', height: '18px', background: 'var(--border-color)', margin: '0 2px' }} />
+
+          <button
+            type="button"
+            onClick={handleZoomIn}
+            className="btn btn-secondary"
+            style={{ padding: '3px 8px', fontSize: '11px', height: '26px' }}
+            title="Zoom in step (+)"
+          >
+            <ZoomIn size={13} />
+          </button>
+          <button
+            type="button"
+            onClick={handleZoomOut}
+            className="btn btn-secondary"
+            style={{ padding: '3px 8px', fontSize: '11px', height: '26px' }}
+            title="Zoom out step (-)"
+          >
+            <ZoomOut size={13} />
+          </button>
+          <button
+            type="button"
+            onClick={() => handleZoomPreset(null)}
+            className="btn btn-secondary"
+            style={{ padding: '3px 8px', fontSize: '11px', height: '26px' }}
+            title="Reset torque chart zoom"
+          >
+            <RotateCcw size={13} />
+          </button>
+        </div>
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <button
+            type="button"
+            onClick={() => setShowLine(prev => !prev)}
+            style={{
+              padding: '3px 8px',
+              borderRadius: '6px',
+              fontSize: '11px',
+              fontWeight: 600,
+              cursor: 'pointer',
+              border: '1px solid var(--border-color)',
+              background: !showLine ? 'var(--accent-blue-light)' : 'transparent',
+              color: !showLine ? 'var(--accent-blue)' : 'var(--text-secondary)'
+            }}
+          >
+            {showLine ? 'Continuous Line' : 'Points Only'}
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setExpanded(prev => !prev)}
+            className="btn btn-secondary"
+            style={{ padding: '3px 8px', fontSize: '11px', height: '26px', display: 'flex', alignItems: 'center', gap: '4px' }}
+            title="Expand or collapse chart height"
+          >
+            {expanded ? <Minimize2 size={13} /> : <Maximize2 size={13} />}
+            <span>{expanded ? 'Collapse' : 'Expand Height (450px)'}</span>
+          </button>
+        </div>
+      </div>
+
+      <div style={{ width: '100%', height: expanded ? '450px' : '320px', transition: 'height 0.2s ease' }}>
         <ResponsiveContainer width="100%" height="100%">
-          <ComposedChart data={chartData} margin={{ top: 10, right: 30, left: 0, bottom: 20 }}>
+          <ComposedChart data={chartData} margin={{ top: 10, right: 30, left: 0, bottom: 10 }}>
             <defs>
               <linearGradient id="tngaTorqueGrad" x1="0" y1="0" x2="0" y2="1">
                 <stop offset="5%" stopColor="#0284c7" stopOpacity={0.2} />
@@ -219,24 +381,46 @@ export default function TorqueChart({
               }}
             />
 
-            <Area
-              type="monotone"
-              dataKey="torque"
-              stroke="none"
-              fill="url(#tngaTorqueGrad)"
-            />
+            {showLine && (
+              <Area
+                type="monotone"
+                dataKey="torque"
+                stroke="none"
+                fill="url(#tngaTorqueGrad)"
+              />
+            )}
 
             <Line
               type="monotone"
               dataKey="torque"
-              stroke="#0284c7"
-              strokeWidth={2}
+              stroke={showLine ? "#0284c7" : "transparent"}
+              strokeWidth={showLine ? 2 : 0}
+              isAnimationActive={false}
               dot={<CustomDot />}
               activeDot={{ r: 7, stroke: '#ffffff', strokeWidth: 2, fill: '#0284c7' }}
               name="Measured Torque"
             />
+
+            <Brush
+              dataKey="time"
+              height={28}
+              stroke="#0284c7"
+              fill="#f0f9ff"
+              startIndex={startIndex}
+              endIndex={endIndex}
+              onChange={(e) => {
+                if (e) {
+                  setStartIndex(e.startIndex);
+                  setEndIndex(e.endIndex);
+                }
+              }}
+            />
           </ComposedChart>
         </ResponsiveContainer>
+      </div>
+      <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '8px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <span>💡 <em>Drag the slider handles at the bottom of the graph to zoom into any time period. Drag the window to pan.</em></span>
+        <span>Showing cycles {startIndex + 1} to {(endIndex !== undefined ? endIndex : chartData.length - 1) + 1} of {chartData.length}</span>
       </div>
     </div>
   );

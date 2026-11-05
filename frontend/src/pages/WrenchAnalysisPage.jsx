@@ -10,7 +10,12 @@ import {
   CheckCircle,
   Calendar,
   Layers,
-  Search
+  Search,
+  ZoomIn,
+  ZoomOut,
+  Maximize2,
+  Minimize2,
+  RotateCcw
 } from 'lucide-react';
 import {
   ResponsiveContainer,
@@ -22,7 +27,8 @@ import {
   YAxis,
   CartesianGrid,
   Tooltip,
-  ReferenceLine
+  ReferenceLine,
+  Brush
 } from 'recharts';
 
 export default function WrenchAnalysisPage({ wrenchId, onSelectWrench }) {
@@ -33,6 +39,9 @@ export default function WrenchAnalysisPage({ wrenchId, onSelectWrench }) {
   const [loading, setLoading] = useState(true);
   const [filterAborts, setFilterAborts] = useState(false);
   const [showLine, setShowLine] = useState(true);
+  const [pulseStartIndex, setPulseStartIndex] = useState(0);
+  const [pulseEndIndex, setPulseEndIndex] = useState(undefined);
+  const [pulseExpanded, setPulseExpanded] = useState(false);
 
   // Load wrenches catalog for selector
   useEffect(() => {
@@ -69,6 +78,47 @@ export default function WrenchAnalysisPage({ wrenchId, onSelectWrench }) {
     if (!filterAborts) return chartData;
     return chartData.filter(d => (d.pulse_count || 0) >= 4);
   }, [chartData, filterAborts]);
+
+  // Keep brush indices updated when chartData changes
+  useEffect(() => {
+    if (displayedChartData && displayedChartData.length > 0) {
+      setPulseStartIndex(0);
+      setPulseEndIndex(displayedChartData.length - 1);
+    }
+  }, [displayedChartData.length]);
+
+  const handleZoomPulseIn = () => {
+    const total = displayedChartData.length;
+    if (total <= 6) return;
+    const start = pulseStartIndex ?? 0;
+    const end = pulseEndIndex ?? (total - 1);
+    const span = end - start;
+    if (span <= 6) return;
+    const step = Math.max(2, Math.floor(span / 4));
+    setPulseStartIndex(Math.min(start + step, end - 5));
+    setPulseEndIndex(Math.max(end - step, start + 5));
+  };
+
+  const handleZoomPulseOut = () => {
+    const total = displayedChartData.length;
+    const start = pulseStartIndex ?? 0;
+    const end = pulseEndIndex ?? (total - 1);
+    const span = end - start;
+    const step = Math.max(2, Math.floor(span / 2));
+    setPulseStartIndex(Math.max(0, start - step));
+    setPulseEndIndex(Math.min(total - 1, end + step));
+  };
+
+  const handleZoomPulsePreset = (count) => {
+    const total = displayedChartData.length;
+    if (!count || total <= count) {
+      setPulseStartIndex(0);
+      setPulseEndIndex(total - 1);
+    } else {
+      setPulseStartIndex(Math.max(0, total - count));
+      setPulseEndIndex(total - 1);
+    }
+  };
 
   return (
     <div>
@@ -254,32 +304,120 @@ export default function WrenchAnalysisPage({ wrenchId, onSelectWrench }) {
 
           {/* 3. Raw Pulse Count Scatter Chart (Section 2.5 A) */}
           <div className="card" style={{ marginBottom: '22px' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px', flexWrap: 'wrap', gap: '10px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px', flexWrap: 'wrap', gap: '10px' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                 <Activity size={18} color="var(--accent-blue)" />
                 <h3 style={{ fontSize: '15px', fontWeight: 700, color: 'var(--text-primary)' }}>
                   Individual Wrench Raw Pulse Count vs Time
                 </h3>
               </div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '12px', fontSize: '12px', flexWrap: 'wrap' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '14px', fontSize: '12px', flexWrap: 'wrap' }}>
                 <span style={{ color: 'var(--accent-blue)', fontWeight: 600 }}>● OK Pulse</span>
                 <span style={{ color: 'var(--accent-red-text)', fontWeight: 600 }}>● Threshold Breach</span>
                 <span style={{ color: 'var(--accent-red-text)' }}>--- Limit ({thresholdMax})</span>
+              </div>
+            </div>
 
-                {/* View Controls: Filter Aborts & Line Toggle */}
+            {/* Interactive Zoom & Detail Controls Toolbar */}
+            <div style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              flexWrap: 'wrap',
+              gap: '8px',
+              padding: '8px 12px',
+              background: 'var(--bg-subtle)',
+              borderRadius: '8px',
+              marginBottom: '14px',
+              fontSize: '12px'
+            }}>
+              {/* Zoom Buttons Group */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
+                <span style={{ fontWeight: 700, color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                  <ZoomIn size={14} color="var(--accent-blue)" /> Zoom:
+                </span>
+                <button
+                  type="button"
+                  onClick={() => handleZoomPulsePreset(null)}
+                  className="btn btn-secondary"
+                  style={{ padding: '3px 8px', fontSize: '11px', height: '26px' }}
+                  title="Show all cycles across entire shift"
+                >
+                  All ({displayedChartData.length})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleZoomPulsePreset(50)}
+                  className="btn btn-secondary"
+                  style={{ padding: '3px 8px', fontSize: '11px', height: '26px' }}
+                  title="Zoom into the last 50 tightening operations"
+                >
+                  Last 50
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleZoomPulsePreset(20)}
+                  className="btn btn-secondary"
+                  style={{ padding: '3px 8px', fontSize: '11px', height: '26px' }}
+                  title="Zoom into the last 20 operations in close detail"
+                >
+                  Last 20
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleZoomPulsePreset(10)}
+                  className="btn btn-secondary"
+                  style={{ padding: '3px 8px', fontSize: '11px', height: '26px' }}
+                  title="Zoom into the last 10 operations for maximum resolution"
+                >
+                  Last 10 (Detail)
+                </button>
+
+                <span style={{ width: '1px', height: '18px', background: 'var(--border-color)', margin: '0 2px' }} />
+
+                <button
+                  type="button"
+                  onClick={handleZoomPulseIn}
+                  className="btn btn-secondary"
+                  style={{ padding: '3px 8px', fontSize: '11px', height: '26px' }}
+                  title="Zoom in step (+)"
+                >
+                  <ZoomIn size={13} />
+                </button>
+                <button
+                  type="button"
+                  onClick={handleZoomPulseOut}
+                  className="btn btn-secondary"
+                  style={{ padding: '3px 8px', fontSize: '11px', height: '26px' }}
+                  title="Zoom out step (-)"
+                >
+                  <ZoomOut size={13} />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleZoomPulsePreset(null)}
+                  className="btn btn-secondary"
+                  style={{ padding: '3px 8px', fontSize: '11px', height: '26px' }}
+                  title="Reset zoom to 100%"
+                >
+                  <RotateCcw size={13} />
+                </button>
+              </div>
+
+              {/* View Filters & Expand */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
                 <button
                   type="button"
                   onClick={() => setFilterAborts(prev => !prev)}
                   style={{
-                    padding: '4px 10px',
+                    padding: '3px 8px',
                     borderRadius: '6px',
                     fontSize: '11px',
                     fontWeight: 600,
                     cursor: 'pointer',
                     border: filterAborts ? '1px solid var(--accent-blue)' : '1px solid var(--border-color)',
-                    background: filterAborts ? 'var(--accent-blue-light)' : 'var(--bg-subtle)',
-                    color: filterAborts ? 'var(--accent-blue)' : 'var(--text-secondary)',
-                    transition: 'all 0.15s ease'
+                    background: filterAborts ? 'var(--accent-blue-light)' : 'transparent',
+                    color: filterAborts ? 'var(--accent-blue)' : 'var(--text-secondary)'
                   }}
                   title="Filter out quick trigger taps (<4 pulses) to see the true tightening distribution"
                 >
@@ -290,26 +428,36 @@ export default function WrenchAnalysisPage({ wrenchId, onSelectWrench }) {
                   type="button"
                   onClick={() => setShowLine(prev => !prev)}
                   style={{
-                    padding: '4px 10px',
+                    padding: '3px 8px',
                     borderRadius: '6px',
                     fontSize: '11px',
                     fontWeight: 600,
                     cursor: 'pointer',
                     border: '1px solid var(--border-color)',
-                    background: !showLine ? 'var(--accent-blue-light)' : 'var(--bg-subtle)',
-                    color: !showLine ? 'var(--accent-blue)' : 'var(--text-secondary)',
-                    transition: 'all 0.15s ease'
+                    background: !showLine ? 'var(--accent-blue-light)' : 'transparent',
+                    color: !showLine ? 'var(--accent-blue)' : 'var(--text-secondary)'
                   }}
                   title="Toggle between connected line and pure scatter points"
                 >
                   {showLine ? 'Line View' : 'Scatter Points Only'}
                 </button>
+
+                <button
+                  type="button"
+                  onClick={() => setPulseExpanded(prev => !prev)}
+                  className="btn btn-secondary"
+                  style={{ padding: '3px 8px', fontSize: '11px', height: '26px', display: 'flex', alignItems: 'center', gap: '4px' }}
+                  title="Expand or collapse chart height"
+                >
+                  {pulseExpanded ? <Minimize2 size={13} /> : <Maximize2 size={13} />}
+                  <span>{pulseExpanded ? 'Collapse' : 'Expand Height (450px)'}</span>
+                </button>
               </div>
             </div>
 
-            <div style={{ width: '100%', height: '300px' }}>
+            <div style={{ width: '100%', height: pulseExpanded ? '450px' : '320px', transition: 'height 0.2s ease' }}>
               <ResponsiveContainer width="100%" height="100%">
-                <ComposedChart data={displayedChartData} margin={{ top: 10, right: 30, left: 0, bottom: 20 }}>
+                <ComposedChart data={displayedChartData} margin={{ top: 10, right: 30, left: 0, bottom: 10 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
                   <XAxis dataKey="time" stroke="#94a3b8" fontSize={11} tickLine={false} dy={8} />
                   <YAxis
@@ -349,8 +497,26 @@ export default function WrenchAnalysisPage({ wrenchId, onSelectWrench }) {
                       return <circle cx={cx} cy={cy} r={isBreach ? 5.5 : 3.5} fill={isBreach ? '#ef4444' : '#2563eb'} stroke="#ffffff" strokeWidth={1.5} />;
                     }}
                   />
+                  <Brush
+                    dataKey="time"
+                    height={28}
+                    stroke="#2563eb"
+                    fill="#f8fafc"
+                    startIndex={pulseStartIndex}
+                    endIndex={pulseEndIndex}
+                    onChange={(e) => {
+                      if (e) {
+                        setPulseStartIndex(e.startIndex);
+                        setPulseEndIndex(e.endIndex);
+                      }
+                    }}
+                  />
                 </ComposedChart>
               </ResponsiveContainer>
+            </div>
+            <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '8px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <span>💡 <em>Drag the slider handles at the bottom of the graph to zoom into any time period. Drag the window to pan.</em></span>
+              <span>Showing cycles {pulseStartIndex + 1} to {(pulseEndIndex !== undefined ? pulseEndIndex : displayedChartData.length - 1) + 1} of {displayedChartData.length}</span>
             </div>
           </div>
 

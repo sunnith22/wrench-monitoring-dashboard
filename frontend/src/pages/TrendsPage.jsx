@@ -23,7 +23,8 @@ import {
   CartesianGrid,
   Tooltip,
   ReferenceLine,
-  Legend
+  Legend,
+  Brush
 } from 'recharts';
 
 export default function TrendsPage() {
@@ -499,6 +500,13 @@ export default function TrendsPage() {
                     dot={<CustomDailyDot />}
                     activeDot={{ r: 8, stroke: '#ffffff', strokeWidth: 2, fill: '#2563eb' }}
                     name="Avg Pulses / Day"
+                  />
+
+                  <Brush
+                    dataKey="day_label"
+                    height={26}
+                    stroke="#2563eb"
+                    fill="#f8fafc"
                   />
                 </ComposedChart>
               </ResponsiveContainer>
