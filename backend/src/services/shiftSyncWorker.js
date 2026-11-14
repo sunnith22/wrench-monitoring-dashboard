@@ -3,9 +3,10 @@ const { RAW_URYU_TOOLS, ALL_WRENCH_ASSETS } = require('../data/wrenchCatalog');
 const { getSchedule, getToolThreshold, getToolThresholdDetails, recordAudit } = require('./configService');
 const { dispatchPulseEmailAlert } = require('./emailService');
 const { query, getPostgresStatus } = require('../config/postgresDB');
+const { runCsvPullJob, getCsvIngestionStatus } = require('./csvIngestionService');
 
-const URYU_API_URL = process.env.FINALDB_API_URL || 'http://10.82.126.73:8121';
-const ADF_TRIGGER_URL = process.env.AZURE_ADF_RUN_URL || null;
+const SYNC_INTERVAL_MINUTES = parseInt(process.env.SYNC_INTERVAL_MINUTES || '5', 10);
+const SYNC_INTERVAL_MS = SYNC_INTERVAL_MINUTES * 60 * 1000;
 
 let isSyncRunning = false;
 let lastSyncResult = {
@@ -226,11 +227,32 @@ async function runSyncPass(windowLabel = 'Manual Trigger') {
 }
 
 /**
- * Clock Tick Runner: checks every 30s against all dynamic windows in configService
+ * Clock Tick Runner & Periodic CSV Ingestion Worker
+ * - Runs CSV pull job every 5 minutes (configured via SYNC_INTERVAL_MINUTES)
+ * - Also checks dynamic shift windows every 30s
  */
 function startDynamicSyncScheduler() {
-  console.log('⏰ [Dynamic Scheduler] Initialized. Monitoring availability windows...');
+  console.log(`⏰ [Dynamic Scheduler] Initialized. Periodic CSV pull active every ${SYNC_INTERVAL_MINUTES} minutes.`);
 
+  // 1. Run initial CSV pull on startup after 3 seconds
+  setTimeout(async () => {
+    try {
+      await runCsvPullJob();
+    } catch (err) {
+      console.warn(`[Startup CSV Ingestion Note]: ${err.message}`);
+    }
+  }, 3000);
+
+  // 2. Periodic background CSV pull from mounted drive (e.g. every 5 minutes)
+  setInterval(async () => {
+    try {
+      await runCsvPullJob();
+    } catch (err) {
+      console.warn(`[Periodic CSV Ingestion Note]: ${err.message}`);
+    }
+  }, SYNC_INTERVAL_MS);
+
+  // 3. Shift Window Watcher (every 30 seconds)
   setInterval(async () => {
     const now = new Date();
     const todayStr = now.toISOString().split('T')[0];
@@ -259,6 +281,7 @@ function getSyncStatus() {
   return {
     isRunning: isSyncRunning,
     lastSync: lastSyncResult,
+    csvIngestion: getCsvIngestionStatus(),
     completedWindowsCountToday: completedWindowsToday.size,
     sqlStatus: getPostgresStatus()
   };

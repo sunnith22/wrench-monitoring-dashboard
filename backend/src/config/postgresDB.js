@@ -2,7 +2,7 @@ const { Pool } = require('pg');
 const { ALL_WRENCH_ASSETS } = require('../data/wrenchCatalog');
 
 const POSTGRES_USER = process.env.POSTGRES_USER || 'tracedb';
-const POSTGRES_HOST = process.env.POSTGRES_HOST || '10.82.126.27';
+const POSTGRES_HOST = process.env.POSTGRES_HOST || '10.82.126.44';
 const POSTGRES_DB = process.env.POSTGRES_DB || 'enginetracking';
 const POSTGRES_PASSWORD = process.env.POSTGRES_PASSWORD || 'Toyota_2022';
 const POSTGRES_PORT = parseInt(process.env.POSTGRES_PORT || '5432', 10);
@@ -12,21 +12,68 @@ let isConnected = false;
 let isTablesReady = false;
 let connectionError = null;
 
-// Local In-Memory Resilient Store (active if shop-floor network 10.82.126.27 is unreachable or tables missing)
+// Local In-Memory Resilient Store (active if plant network 10.82.126.44 is unreachable or tables missing)
 const localFallbackCycles = [];
 const localFallbackSyncLogs = [];
 
 /**
  * Local In-Memory Live Store.
- * Strictly holds genuine shop-floor telemetry from line PC (http://10.82.126.73:8121).
+ * Strictly holds genuine shop-floor telemetry pulled from the mounted Local PC CSV files.
  * NO dummy or pre-seeded data.
  */
 function seedLocalFallbackStore() {
-  console.log(`💾 [Live Telemetry Store] Ready. Capturing genuine shop-floor cycles from line PC.`);
+  console.log(`💾 [Live Telemetry Store] Ready. Capturing genuine shop-floor cycles from mounted drive.`);
 }
 
 // Seed store immediately
 seedLocalFallbackStore();
+
+async function ensureSchema(client) {
+  try {
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS wrench_tightening_cycles (
+        id SERIAL PRIMARY KEY,
+        wrench_id VARCHAR(64) NOT NULL,
+        tool_name VARCHAR(128),
+        station VARCHAR(32),
+        folder VARCHAR(32),
+        line VARCHAR(32),
+        engine_no VARCHAR(64),
+        tightening_time VARCHAR(64) NOT NULL,
+        reception_time VARCHAR(64),
+        torque_val NUMERIC(6,2),
+        torque_status VARCHAR(16),
+        angle_val NUMERIC(6,2),
+        angle_status VARCHAR(16),
+        pulse_count INTEGER,
+        pulse_status VARCHAR(16),
+        cycle_counter INTEGER,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        CONSTRAINT uq_wrench_cycle UNIQUE (wrench_id, tightening_time, cycle_counter)
+      );
+      CREATE INDEX IF NOT EXISTS idx_wrench_cycles_lookup ON wrench_tightening_cycles(wrench_id, tightening_time);
+      CREATE INDEX IF NOT EXISTS idx_wrench_cycles_station ON wrench_tightening_cycles(station, folder);
+
+      CREATE TABLE IF NOT EXISTS shift_sync_logs (
+        id SERIAL PRIMARY KEY,
+        sync_id VARCHAR(64) NOT NULL,
+        sync_source VARCHAR(64),
+        window_name VARCHAR(64),
+        start_time TIMESTAMP,
+        end_time TIMESTAMP,
+        records_pulled INTEGER DEFAULT 0,
+        records_inserted INTEGER DEFAULT 0,
+        status VARCHAR(32),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    console.log('✅ [PostgreSQL] Schema `wrench_tightening_cycles` verified & initialized on 10.82.126.44.');
+    return true;
+  } catch (err) {
+    console.warn('⚠️ [PostgreSQL Schema Init Error]:', err.message);
+    return false;
+  }
+}
 
 try {
   pool = new Pool({
@@ -56,16 +103,9 @@ try {
     connectionError = null;
     console.log(`✅ [PostgreSQL] Connected to ${POSTGRES_DB} at ${POSTGRES_HOST}:${POSTGRES_PORT}`);
 
-    // Check if tables already exist
+    // Ensure tables exist
     try {
-      const chk = await client.query("SELECT to_regclass('public.wrench_tightening_cycles') as tbl_exists;");
-      if (chk.rows[0]?.tbl_exists) {
-        isTablesReady = true;
-        console.log('✅ [PostgreSQL] Schema `wrench_tightening_cycles` verified & active for SQL queries.');
-      } else {
-        isTablesReady = false;
-        console.log('ℹ️ [PostgreSQL] Table `wrench_tightening_cycles` not yet present on server. Using local fallback cache.');
-      }
+      isTablesReady = await ensureSchema(client);
     } catch (chkErr) {
       isTablesReady = false;
     } finally {

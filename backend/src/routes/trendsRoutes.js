@@ -3,10 +3,11 @@ const router = express.Router();
 const { ALL_WRENCH_ASSETS } = require('../data/wrenchCatalog');
 const { fetchWrenchOperations } = require('../services/dataIngestionService');
 const { getToolThreshold } = require('../services/configService');
-const { localFallbackCycles } = require('../config/postgresDB');
+const { localFallbackCycles, query, getPostgresStatus } = require('../config/postgresDB');
 
 /**
- * Builds daily average pulse trend strictly from REAL ingested live shop-floor operations.
+ * Builds daily average pulse trend strictly from REAL ingested shop-floor operations.
+ * Queries PostgreSQL on 10.82.126.44 (or fallback in-memory cache) across historical days.
  * NO simulated data, NO fake tool changes, NO fake alerts.
  */
 async function buildRealDailyPulseTrend(wrench, daysCount = 8) {
@@ -14,8 +15,37 @@ async function buildRealDailyPulseTrend(wrench, daysCount = 8) {
   const today = new Date();
   const todayStr = today.toISOString().split('T')[0];
 
-  // 1. Ingest live operations for today from the shop-floor line PC
+  // 1. Ingest/fetch operations for today
   const todayRecords = await fetchWrenchOperations(wrench, todayStr);
+
+  // 2. Fetch multi-day records from PostgreSQL if available
+  let pgDayMap = new Map();
+  const pgStatus = getPostgresStatus();
+  if (pgStatus.connected && pgStatus.tablesReady) {
+    try {
+      const sqlRes = await query(`
+        SELECT 
+          LEFT(tightening_time, 10) as cycle_date,
+          AVG(pulse_count) as avg_pulse,
+          MIN(pulse_count) as min_pulse,
+          MAX(pulse_count) as max_pulse,
+          COUNT(*) as op_count,
+          COUNT(*) FILTER (WHERE torque_status = 'OK') as ok_count
+        FROM wrench_tightening_cycles
+        WHERE wrench_id = $1
+        GROUP BY LEFT(tightening_time, 10)
+        ORDER BY cycle_date ASC;
+      `, [wrench.wrench_id]);
+
+      if (sqlRes && sqlRes.rows) {
+        for (const row of sqlRes.rows) {
+          pgDayMap.set(row.cycle_date, row);
+        }
+      }
+    } catch (pgErr) {
+      // Handled via localFallbackCycles
+    }
+  }
 
   const points = [];
   let alertDay = null;
@@ -27,22 +57,46 @@ async function buildRealDailyPulseTrend(wrench, daysCount = 8) {
     const dateStr = dayDate.toISOString().split('T')[0];
     const dateDisplay = dayDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 
-    let dayRecords = [];
-    if (dateStr === todayStr) {
-      dayRecords = todayRecords;
+    let avgPulse = 0;
+    let minPulse = 0;
+    let maxPulse = 0;
+    let opCount = 0;
+    let okCount = 0;
+    let hasData = false;
+
+    // Check PostgreSQL aggregation first
+    if (pgDayMap.has(dateStr)) {
+      const pgRow = pgDayMap.get(dateStr);
+      avgPulse = Number(parseFloat(pgRow.avg_pulse || 0).toFixed(1));
+      minPulse = Number(pgRow.min_pulse || 0);
+      maxPulse = Number(pgRow.max_pulse || 0);
+      opCount = parseInt(pgRow.op_count || 0, 10);
+      okCount = parseInt(pgRow.ok_count || 0, 10);
+      hasData = opCount > 0;
     } else {
-      dayRecords = localFallbackCycles.filter(c => c.wrench_id === wrench.wrench_id && c.tightening_time && c.tightening_time.startsWith(dateStr));
+      // Fallback to local records
+      let dayRecords = [];
+      if (dateStr === todayStr) {
+        dayRecords = todayRecords;
+      } else {
+        dayRecords = localFallbackCycles.filter(c => c.wrench_id === wrench.wrench_id && c.tightening_time && c.tightening_time.startsWith(dateStr));
+      }
+
+      if (dayRecords.length > 0) {
+        const pulseCounts = dayRecords.map(r => r.pulse_count || r.pulses || 0).filter(p => p > 0);
+        avgPulse = pulseCounts.length > 0
+          ? Number((pulseCounts.reduce((a, b) => a + b, 0) / pulseCounts.length).toFixed(1))
+          : 0;
+        minPulse = pulseCounts.length > 0 ? Math.min(...pulseCounts) : 0;
+        maxPulse = pulseCounts.length > 0 ? Math.max(...pulseCounts) : 0;
+        okCount = dayRecords.filter(r => r.judgement === 'OK' || r.torque_status === 'OK').length;
+        opCount = dayRecords.length;
+        hasData = true;
+      }
     }
 
-    if (dayRecords.length > 0) {
-      const pulseCounts = dayRecords.map(r => r.pulse_count || r.pulses || 0).filter(p => p > 0);
-      const avgPulse = pulseCounts.length > 0
-        ? Number((pulseCounts.reduce((a, b) => a + b, 0) / pulseCounts.length).toFixed(1))
-        : 0;
-      const minPulse = pulseCounts.length > 0 ? Math.min(...pulseCounts) : 0;
-      const maxPulse = pulseCounts.length > 0 ? Math.max(...pulseCounts) : 0;
-      const okCount = dayRecords.filter(r => r.judgement === 'OK' || r.torque_status === 'OK').length;
-      const ngCount = dayRecords.length - okCount;
+    if (hasData) {
+      const ngCount = Math.max(0, opCount - okCount);
       const isAlert = avgPulse > threshold;
       if (isAlert && !alertDay) alertDay = i;
 
@@ -54,7 +108,7 @@ async function buildRealDailyPulseTrend(wrench, daysCount = 8) {
         avg_pulse_count: avgPulse,
         min_pulse: minPulse,
         max_pulse: maxPulse,
-        operations_count: dayRecords.length,
+        operations_count: opCount,
         ok_count: okCount,
         ng_count: ngCount,
         threshold_limit: threshold,

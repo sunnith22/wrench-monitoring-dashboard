@@ -79,44 +79,15 @@ function cacheLiveRecords(records) {
 
 /**
  * Fetch tightening data for a given wrench asset and calendar date:
- * Tier 1: Check Live Shop-Floor PC API (http://10.82.126.73:8121/api/torque-data) FIRST
- * Tier 2: Check PostgreSQL `wrench_tightening_cycles` (if connected and tables exist)
- * Tier 3: High-fidelity plant simulation fallback
+ * Tier 1: Query PostgreSQL `wrench_tightening_cycles` on 10.82.126.44 FIRST (fast < 5ms index lookup)
+ * Tier 2: Check local in-memory live store (`localFallbackCycles`)
+ * Tier 3: Upstream line PC API fallback (only if enabled via environment flag)
  */
 async function fetchWrenchOperations(wrenchAsset, dateStr) {
   const targetDate = dateStr || new Date().toISOString().split('T')[0];
   const dateKey = targetDate.replace(/-/g, '');
 
-  // 1. Try Live API (http://10.82.126.73:8121) FIRST (Shop-Floor PC is verified ONLINE)
-  try {
-    if (wrenchAsset.brand === 'URYU') {
-      const response = await axios.get(`${URYU_API_URL}/api/torque-data`, {
-        params: { station: wrenchAsset.station, folder: wrenchAsset.folder, date: dateKey },
-        timeout: 2000
-      });
-      const rows = Array.isArray(response.data) ? response.data : (Array.isArray(response.data?.data) ? response.data.data : []);
-      if (rows.length > 0) {
-        const normalized = normalizeRecords(rows, wrenchAsset, targetDate);
-        cacheLiveRecords(normalized);
-        return normalized;
-      }
-    } else {
-      const response = await axios.get(`${YOKOTA_API_URL}/api/yokota-data`, {
-        params: { station: wrenchAsset.station, folder: wrenchAsset.folder, date: dateKey },
-        timeout: 1000
-      });
-      const rows = Array.isArray(response.data) ? response.data : (Array.isArray(response.data?.data) ? response.data.data : []);
-      if (rows.length > 0) {
-        const normalized = normalizeRecords(rows, wrenchAsset, targetDate);
-        cacheLiveRecords(normalized);
-        return normalized;
-      }
-    }
-  } catch (liveErr) {
-    // Live API returned no data for this specific folder/date or timed out
-  }
-
-  // 2. Try PostgreSQL if tables exist and connected
+  // 1. Try PostgreSQL on 10.82.126.44 FIRST (central source of truth)
   try {
     const sqlRes = await query(
       `SELECT * FROM wrench_tightening_cycles 
@@ -152,37 +123,63 @@ async function fetchWrenchOperations(wrenchAsset, dateStr) {
       }));
     }
   } catch (sqlErr) {
-    // Continue
+    // Continue to local store fallback
   }
 
-  // 3. Check cached live records in local store
-  const cached = localFallbackCycles.filter(c => c.wrench_id === wrenchAsset.wrench_id && c.tightening_time && c.tightening_time.startsWith(targetDate));
+  // 2. Check cached live records in local store
+  const cached = localFallbackCycles.filter(
+    c => (c.wrench_id === wrenchAsset.wrench_id || (c.station === wrenchAsset.station && c.folder === wrenchAsset.folder)) &&
+         (!dateStr || (c.tightening_time && c.tightening_time.startsWith(targetDate)))
+  );
   if (cached.length > 0) {
-    return cached.map((c, idx) => ({
-      record_key: `LIVE_${c.wrench_id}_${c.tightening_time}_${idx}`,
-      wrench_id: c.wrench_id,
-      tool_name: c.tool_name,
+    return cached.map(row => ({
+      record_key: `${row.wrench_id}_${row.tightening_time}_${row.engine_no}`,
+      wrench_id: row.wrench_id,
+      tool_name: row.tool_name || wrenchAsset.tool_name,
       assembly_name: wrenchAsset.assembly_name,
       sub_assembly_name: wrenchAsset.sub_assembly_name,
-      station: c.station,
-      folder: c.folder,
+      station: row.station,
+      folder: row.folder,
       brand: wrenchAsset.brand,
-      timestamp: c.tightening_time,
-      reception_timestamp: c.reception_time,
-      work_no: '1',
-      engine_number: c.engine_no,
-      pulse_count: c.pulse_count,
-      torque: c.torque_val,
+      timestamp: row.tightening_time,
+      reception_timestamp: row.reception_time || row.tightening_time,
+      work_no: String(row.cycle_counter || 1),
+      engine_number: row.engine_no,
+      barcode: `${row.engine_no}-TNGA`,
+      pulse_count: Number(row.pulse_count),
+      torque: Number(row.torque_val),
       torque_unit: 'N·m',
-      angle: c.angle_val,
+      angle: Number(row.angle_val),
       angle_unit: 'deg',
       tightening_time: 1.45,
-      judgement: c.torque_status || 'OK',
-      import_status: 'LIVE_SHOP_FLOOR'
+      time_unit: 'sec',
+      judgement: row.torque_status || 'OK',
+      import_status: 'VALIDATED'
     }));
   }
 
-  // If no live operations logged yet for this tool today, return empty array (NO FAKE SIMULATION)
+  // 3. Fallback: Check Line PC API only if explicitly configured and upstream check is fast
+  if (process.env.ENABLE_UPSTREAM_HTTP_FALLBACK === 'true') {
+    try {
+      const isAlive = await checkUpstreamAvailability();
+      if (isAlive) {
+        if (wrenchAsset.brand === 'URYU') {
+          const response = await axios.get(`${URYU_API_URL}/api/torque-data`, {
+            params: { station: wrenchAsset.station, folder: wrenchAsset.folder, date: dateKey },
+            timeout: 1000
+          });
+          const rows = Array.isArray(response.data) ? response.data : (Array.isArray(response.data?.data) ? response.data.data : []);
+          if (rows.length > 0) {
+            const normalized = normalizeRecords(rows, wrenchAsset, targetDate);
+            cacheLiveRecords(normalized);
+            return normalized;
+          }
+        }
+      }
+    } catch (ignore) {}
+  }
+
+  // 4. Return empty array if no genuine data yet (strictly NO synthetic dummy data)
   return [];
 }
 

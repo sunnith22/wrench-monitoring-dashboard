@@ -4,7 +4,7 @@ const axios = require('axios');
 const mongoose = require('mongoose');
 
 const POSTGRES_USER = process.env.POSTGRES_USER || 'tracedb';
-const POSTGRES_HOST = process.env.POSTGRES_HOST || '10.82.126.27';
+const POSTGRES_HOST = process.env.POSTGRES_HOST || '10.82.126.44';
 const POSTGRES_DB = process.env.POSTGRES_DB || 'enginetracking';
 const POSTGRES_PASSWORD = process.env.POSTGRES_PASSWORD || 'Toyota_2022';
 const POSTGRES_PORT = parseInt(process.env.POSTGRES_PORT || '5432', 10);

@@ -82,9 +82,7 @@ const RAW_YOKOTA_TOOLS = [
   { contr_no: "70", station: "61", folder: "0102", tool_name: "I/M BKT BOLT (IN MANI) (YOKOTA)", line: "MK3", defaultThreshold: 22, targetTorque: 17.0, torqueMin: 15.0, torqueMax: 19.0 }
 ];
 
-/**
- * Resolves Assembly and Sub-Assembly names from line code
- */
+
 function resolveAssembly(line) {
   switch (line) {
     case 'BS':
@@ -108,7 +106,7 @@ function resolveAssembly(line) {
   }
 }
 
-// Build enriched Master Asset Register (73 Tools)
+
 let serialCounter = 101;
 const ALL_WRENCH_ASSETS = [
   ...RAW_URYU_TOOLS.map(t => {

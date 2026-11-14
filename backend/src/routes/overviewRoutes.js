@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { ALL_WRENCH_ASSETS } = require('../data/wrenchCatalog');
-const { localFallbackCycles, getPostgresStatus } = require('../config/postgresDB');
+const { localFallbackCycles, getPostgresStatus, query } = require('../config/postgresDB');
 
 // In-Memory store for active alert records (starts clean for live shift)
 const inMemoryAlerts = [];
@@ -9,7 +9,7 @@ const inMemoryAlerts = [];
 /**
  * GET /api/dashboard/overview - Management KPIs, OK/NG Donut, Assembly Health & Feed Status
  */
-router.get('/', (req, res) => {
+router.get('/', async (req, res) => {
   const totalWrenches = ALL_WRENCH_ASSETS.length; // 73
   const activeWrenches = ALL_WRENCH_ASSETS.filter(w => w.status === 'ACTIVE').length;
 
@@ -19,16 +19,33 @@ router.get('/', (req, res) => {
   const assy3Tools = ALL_WRENCH_ASSETS.filter(w => w.assembly_id === 'assembly-3').length;
 
   // Calculate live dynamic counts strictly from real ingested operations
-  const totalOperations = localFallbackCycles.length;
-  const ngOperations = localFallbackCycles.filter(c => c.torque_status === 'NG' || c.pulse_status === 'CRITICAL').length;
+  let totalOperations = localFallbackCycles.length;
+  let ngOperations = localFallbackCycles.filter(c => c.torque_status === 'NG' || c.pulse_status === 'CRITICAL').length;
+
+  const pgStatus = getPostgresStatus();
+  if (pgStatus.connected && pgStatus.tablesReady) {
+    try {
+      const sqlRes = await query(`
+        SELECT 
+          COUNT(*) as total,
+          COUNT(*) FILTER (WHERE torque_status = 'NG' OR pulse_status = 'CRITICAL') as ng_count
+        FROM wrench_tightening_cycles;
+      `);
+      if (sqlRes && sqlRes.rows && sqlRes.rows[0]) {
+        totalOperations = parseInt(sqlRes.rows[0].total || 0, 10);
+        ngOperations = parseInt(sqlRes.rows[0].ng_count || 0, 10);
+      }
+    } catch (sqlErr) {
+      // Handled via localFallbackCycles
+    }
+  }
+
   const okOperations = Math.max(0, totalOperations - ngOperations);
   const okPercentage = totalOperations > 0 ? Number(((okOperations / totalOperations) * 100).toFixed(1)) : 100;
   const ngPercentage = totalOperations > 0 ? Number(((ngOperations / totalOperations) * 100).toFixed(1)) : 0;
 
   const openAlertsCount = inMemoryAlerts.filter(a => a.status === 'OPEN').length;
   const acknowledgedAlertsCount = inMemoryAlerts.filter(a => a.status === 'ACKNOWLEDGED').length;
-
-  const pgStatus = getPostgresStatus();
 
   res.json({
     success: true,
