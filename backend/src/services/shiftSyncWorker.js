@@ -98,21 +98,9 @@ async function runSyncPass(windowLabel = 'Manual Trigger') {
           // Local PC unreachable or off-network fallback
         }
 
-        // If upstream offline, generate sample cycle telemetry to simulate live monitoring
-        if (rows.length === 0) {
-          const currentLimit = getToolThreshold(tool.wrench_id);
-          const nominal = Math.max(10, currentLimit - 4);
-          const isSpike = (tool.wrench_id.includes('ST28_F016') || tool.wrench_id.includes('STBlock_sub_assy_F001')) && Math.random() < 0.25;
-          const simulatedPulses = isSpike ? (currentLimit + 3) : Math.round(nominal + (Math.random() * 3 - 1.5));
-
-          rows = [{
-            'Tightening date/time': `${todayStr} ${new Date().toTimeString().split(' ')[0]}`,
-            'WorkNO.': `NG60${Math.floor(100 + Math.random() * 800)}`,
-            'Number of pulses': simulatedPulses,
-            'Torque': (tool.approved_torque_target || 22.0) + (Math.random() * 0.8 - 0.4),
-            'Angle': 45.0 + (Math.random() * 2.0 - 1.0),
-            'Judgement': simulatedPulses > currentLimit ? 'NG' : 'OK'
-          }];
+        // If upstream offline or no cycles returned for this tool, skip (STRICTLY GENUINE DATA ONLY)
+        if (!rows || rows.length === 0) {
+          continue;
         }
 
         totalFetched += rows.length;

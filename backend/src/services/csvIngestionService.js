@@ -2,27 +2,30 @@
  * ==============================================================================
  * TOYOTA INDUSTRIES ENGINE INDIA (TIEI)
  * TNGA Impact Wrench Monitoring & Telemetry Infrastructure
- * Module: Ultra-Low-Impact Shop-Floor CSV Ingestion Service (URYU & YOKOTA)
+ * Module: Multi-Source Shop-Floor Ingestion Service (URYU & YOKOTA)
  * ==============================================================================
- * CRITICAL SAFETY REQUIREMENT:
- *   The shop-floor PC (172.16.105.234) is an industrial controller PC that cannot
- *   handle heavy multitasking or file locking. If this PC hangs, THE ENTIRE
- *   PRODUCTION LINE WILL STOP.
+ * Mount Architecture on Server 10.82.126.73:
+ *   - URYU Mount:   /mnt/torque_wrench <== //172.16.105.234/D
+ *   - YOKOTA Mount: /mnt/yokota        <== //172.16.105.234/c
  * 
- * SAFETY MEASURES IMPLEMENTED TO PREVENT HANGING & PROTECT PRODUCTION:
- *   1. Auto-Mount / Zero-Manual: Directly resolves \\172.16.105.234\DATA or Z:\ automatically.
- *   2. Shared Read-Only Access: Opens files with flags: 'r' (never holds exclusive locks).
- *   3. Micro-Buffer Reader (1 KB): Reads ONLY the first 3 lines (<300 bytes) of cycle files
- *      to capture "Puls" and "Trq", then INSTANTLY destroys the stream. Never parses
- *      hundreds of curve points.
- *   4. Throttled Pacing: Adds 30ms sleep between files and 150ms sleep between folders.
- *      CPU impact on the shop-floor PC is kept strictly < 0.5%.
- *   5. Instant File Skipping: Remembers already-ingested files in a fast Set; never re-opens
- *      or stats files that were already processed.
- *   6. Today-Only Targeting: Only checks today's date folder (YYYYMMDD); never crawls
- *      historical folders.
- *   7. PostgreSQL Persistence: Inserts into 10.82.126.44 with ON CONFLICT DO NOTHING,
- *      clubbing new tightenings into the existing database.
+ * Windows Fallback UNC Shares:
+ *   - URYU:   \\172.16.105.234\D (or Z:\)
+ *   - YOKOTA: \\172.16.105.234\c (or Y:\)
+ * 
+ * Upstream Server APIs:
+ *   - URYU API:   http://10.82.126.73:8121/api/torque-data
+ *   - YOKOTA API: http://10.82.126.73:8127/api/yokota-data
+ * 
+ * Target Database:
+ *   - PostgreSQL on 10.82.126.44 (DB: enginetracking, Table: wrench_tightening_cycles)
+ * 
+ * CRITICAL SAFETY REQUIREMENT:
+ *   The shop-floor PC (172.16.105.234) is an industrial PC running line operations.
+ *   Our service operates in "Stealth Mode":
+ *     1. Reads Line 3 only (<300 bytes) and immediately destroys the stream.
+ *     2. Paces execution with 30ms sleep per file and 150ms sleep per tool.
+ *     3. Only targets today's date folder (YYYYMMDD).
+ *     4. Zero CPU/disk impact on the production line PC.
  * ==============================================================================
  */
 
@@ -30,17 +33,23 @@ const fs = require('fs');
 const fsp = require('fs').promises;
 const path = require('path');
 const readline = require('readline');
+const axios = require('axios');
 const { exec } = require('child_process');
 const { ALL_WRENCH_ASSETS } = require('../data/wrenchCatalog');
 const { query, localFallbackCycles, getPostgresStatus } = require('../config/postgresDB');
 const { getToolThreshold } = require('./configService');
 const { dispatchPulseEmailAlert } = require('./emailService');
 
-// Network mount / shared folder configuration
-let DATA_MOUNT_PATH = process.env.DATA_MOUNT_PATH || '\\\\172.16.105.234\\DATA';
-const LOCAL_MOUNT_DRIVE = process.env.LOCAL_MOUNT_DRIVE || 'Z:';
-const SHARE_USERNAME = process.env.SHARE_USERNAME || '';
-const SHARE_PASSWORD = process.env.SHARE_PASSWORD || '';
+// Mount Paths (Server 10.82.126.73 mounts or Windows network shares)
+const URYU_MOUNT_PATH = process.env.URYU_MOUNT_PATH || '/mnt/torque_wrench';
+const YOKOTA_MOUNT_PATH = process.env.YOKOTA_MOUNT_PATH || '/mnt/yokota';
+const URYU_UNC_SHARE = process.env.URYU_UNC_SHARE || '\\\\172.16.105.234\\D';
+const YOKOTA_UNC_SHARE = process.env.YOKOTA_UNC_SHARE || '\\\\172.16.105.234\\c';
+const FALLBACK_MOUNT = process.env.DATA_MOUNT_PATH || 'Z:\\';
+
+// Upstream Server APIs on 10.82.126.73
+const URYU_API_URL = process.env.FINALDB_API_URL || 'http://10.82.126.73:8121';
+const YOKOTA_API_URL = process.env.YOKOTA_API_URL || 'http://10.82.126.73:8127';
 
 // Memory trackers to prevent redundant re-reading
 const fileLineTracker = new Map();
@@ -51,7 +60,8 @@ const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 // Live sync metrics
 let lastSyncStats = {
   lastRunTimestamp: null,
-  activeMountPath: DATA_MOUNT_PATH,
+  activeUryuSource: null,
+  activeYokotaSource: null,
   toolFoldersFound: 0,
   filesProcessed: 0,
   rowsIngested: 0,
@@ -78,54 +88,21 @@ function getDateKeys(date = new Date()) {
 }
 
 /**
- * Auto-Mounts or establishes SMB network connection to the shop-floor PC without user intervention.
- * 1. Checks if UNC path \\172.16.105.234\DATA is accessible directly.
- * 2. If not, checks if Z:\ is already mapped.
- * 3. If neither, silently runs Windows net use to connect.
+ * Checks which path exists and is accessible
  */
-async function ensureNetworkAccess() {
-  // Test direct UNC path first
-  try {
-    await fsp.access(DATA_MOUNT_PATH, fs.constants.R_OK);
-    return { ok: true, activePath: DATA_MOUNT_PATH };
-  } catch (uncErr) {
-    // If UNC fails, check if local drive (e.g. Z:\) is mapped
-    const driveRoot = LOCAL_MOUNT_DRIVE.endsWith('\\') ? LOCAL_MOUNT_DRIVE : `${LOCAL_MOUNT_DRIVE}\\`;
+async function resolveAccessiblePath(candidatePaths) {
+  for (const p of candidatePaths) {
+    if (!p) continue;
     try {
-      await fsp.access(driveRoot, fs.constants.R_OK);
-      return { ok: true, activePath: driveRoot };
-    } catch (driveErr) {
-      // Attempt automated background net use connection
-      if (DATA_MOUNT_PATH.startsWith('\\\\')) {
-        return new Promise((resolve) => {
-          let cmd = `net use ${LOCAL_MOUNT_DRIVE} "${DATA_MOUNT_PATH}" /persistent:yes`;
-          if (SHARE_USERNAME && SHARE_PASSWORD) {
-            cmd = `net use ${LOCAL_MOUNT_DRIVE} "${DATA_MOUNT_PATH}" /user:${SHARE_USERNAME} "${SHARE_PASSWORD}" /persistent:yes`;
-          }
-
-          exec(cmd, { timeout: 4000 }, (err, stdout, stderr) => {
-            if (!err || (stdout && stdout.includes('successfully'))) {
-              console.log(`✅ [Auto-Mount] Successfully connected ${DATA_MOUNT_PATH} to ${LOCAL_MOUNT_DRIVE}`);
-              resolve({ ok: true, activePath: driveRoot });
-            } else if (stderr && stderr.includes('Multiple connections')) {
-              resolve({ ok: true, activePath: driveRoot });
-            } else {
-              resolve({ ok: false, error: stderr || err?.message || 'Network path unreachable' });
-            }
-          });
-        });
-      }
-      return { ok: false, error: uncErr.message };
-    }
+      await fsp.access(p, fs.constants.R_OK);
+      return p;
+    } catch (err) {}
   }
+  return null;
 }
 
 /**
  * Resolves a Wrench Asset from folder number, controller IP, or filename
- * Handles:
- *   - Folder "029" (Station 46) -> URYU_ST46_F029 (Controller IP .24)
- *   - Folder "019" (Station 46) -> URYU_ST46_F019 (Controller IP .25)
- *   - Folder "0103" (Station 53) -> YOKOTA_ST53_F0103 (Controller IP .103)
  */
 function resolveWrench(folderToken, ipToken = null, fileName = '') {
   const normFolder = String(folderToken || '').replace(/^0+/, '') || '0';
@@ -149,7 +126,7 @@ function resolveWrench(folderToken, ipToken = null, fileName = '') {
     if (byFolderFromIp) return byFolderFromIp;
   }
 
-  // 3. Filename token match (e.g. "F-Data_ST28_016.csv" or "0103_120_0_100_103_*.csv")
+  // 3. Filename token match
   const upperFile = fileName.toUpperCase();
   for (const tool of ALL_WRENCH_ASSETS) {
     if (upperFile.includes(tool.wrench_id.toUpperCase())) return tool;
@@ -163,8 +140,7 @@ function resolveWrench(folderToken, ipToken = null, fileName = '') {
  * ULTRA-SAFE MICRO-READER for individual cycle files (<timestamp>.csv)
  * Reads ONLY the first 3 lines (< 300 bytes) with highWaterMark: 1024.
  * Once Line 3 ("Final: ... Puls 17 Trq 7") is parsed, it INSTANTLY destroys
- * the stream and releases the file handle. Never reads the curve data.
- * Zero CPU / RAM impact on shop-floor PC.
+ * the stream and releases the file handle. Never parses curve points.
  */
 function parseIndividualCycleFileSafely(filePath, fileName) {
   return new Promise((resolve) => {
@@ -201,7 +177,6 @@ function parseIndividualCycleFileSafely(filePath, fileName) {
       lineIndex++;
       const trimmed = line.trim();
 
-      // Look for the "Final:" summary row on Line 3
       if (lineIndex <= 4 && (trimmed.startsWith('Final:') || trimmed.includes('Puls') || trimmed.includes('Pulse'))) {
         const tokens = trimmed.replace(/\t/g, ',').split(',').map(t => t.trim()).filter(Boolean);
         const parsed = {};
@@ -224,7 +199,7 @@ function parseIndividualCycleFileSafely(filePath, fileName) {
 
         if (parsed.pulse !== undefined || parsed.torque !== undefined) {
           finalRowData = parsed;
-          cleanup(); // IMMEDIATELY close stream once summary values are captured!
+          cleanup();
         }
       }
 
@@ -237,7 +212,6 @@ function parseIndividualCycleFileSafely(filePath, fileName) {
       if (!resolved) resolved = true;
       if (!finalRowData) return resolve(null);
 
-      // Parse timestamp from filename: YYYYMMDDhhmmssfff.csv -> "YYYY-MM-DD hh:mm:ss"
       let tighteningTime = new Date().toISOString();
       const baseName = path.basename(fileName, path.extname(fileName));
       const timeMatch = baseName.match(/(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})/);
@@ -444,12 +418,10 @@ async function insertCyclesToPostgres(wrench, cycles) {
 }
 
 /**
- * Discovers root data directories under mount path
- * e.g. \\172.16.105.234\DATA\DATA-28mar, Z:\DATA-28mar, or root directly
+ * Discovers subdirectories under base path (e.g. DATA-28mar, AppData, etc.)
  */
 async function discoverRootDirectories(basePath) {
   const roots = [basePath];
-
   try {
     const entries = await fsp.readdir(basePath, { withFileTypes: true });
     for (const entry of entries) {
@@ -461,179 +433,244 @@ async function discoverRootDirectories(basePath) {
       }
     }
   } catch (err) {}
-
   return [...new Set(roots)];
 }
 
 /**
+ * Ingests files from a mount directory tree
+ */
+async function scanAndIngestMountRoot(mountRoot, dateKeys) {
+  let rowsAdded = 0;
+  let dupsSkipped = 0;
+  let filesChecked = 0;
+  let toolFoldersFound = 0;
+
+  const searchRoots = await discoverRootDirectories(mountRoot);
+
+  for (const rootDir of searchRoots) {
+    let entries = [];
+    try {
+      entries = await fsp.readdir(rootDir, { withFileTypes: true });
+    } catch (err) {
+      continue;
+    }
+
+    const folderCandidates = entries.filter(e => e.isDirectory() && /^\d+$/.test(e.name));
+
+    for (const fEntry of folderCandidates) {
+      const folderNumber = fEntry.name;
+      const toolDir = path.join(rootDir, folderNumber);
+
+      const dateSubfolders = [
+        path.join(toolDir, 'UEC-4800', dateKeys.compact),
+        path.join(toolDir, dateKeys.compact),
+        path.join(toolDir, 'UEC-4800', dateKeys.dashes)
+      ];
+
+      // Check Yokota IP subfolder like 120_0_100_*
+      try {
+        const subEntries = await fsp.readdir(toolDir, { withFileTypes: true });
+        for (const sub of subEntries) {
+          if (sub.isDirectory() && (sub.name.startsWith('120_') || sub.name.toUpperCase() === 'YOKOTA')) {
+            dateSubfolders.push(path.join(toolDir, sub.name, dateKeys.compact));
+          }
+        }
+      } catch (subErr) {}
+
+      for (const activeDateDir of dateSubfolders) {
+        const dirExists = await fsp.access(activeDateDir).then(() => true).catch(() => false);
+        if (!dirExists) continue;
+
+        toolFoldersFound++;
+        let files = [];
+        try {
+          files = await fsp.readdir(activeDateDir);
+        } catch (readDirErr) {
+          continue;
+        }
+
+        const csvFiles = files.filter(f => f.toLowerCase().endsWith('.csv'));
+
+        for (const file of csvFiles) {
+          const fullPath = path.join(activeDateDir, file);
+
+          if (processedIndividualFiles.has(fullPath)) continue;
+
+          filesChecked++;
+          const wrench = resolveWrench(folderNumber, null, file);
+          if (!wrench) continue;
+
+          // Summary CSV
+          if (file.startsWith('F-Data') || file.toLowerCase().includes('summary') || file.toLowerCase().includes('tightening')) {
+            const summaryRows = await parseSummaryCsvFileSafely(fullPath);
+            if (summaryRows.length > 0) {
+              const { inserted, skipped } = await insertCyclesToPostgres(wrench, summaryRows);
+              rowsAdded += inserted;
+              dupsSkipped += skipped;
+              if (inserted > 0) {
+                console.log(`   -> [${wrench.wrench_id}] ${file}: +${inserted} new cycles saved.`);
+              }
+            }
+          } else if (/^\d{8,}/.test(file)) {
+            // Individual cycle CSV: read Line 3 micro-buffer
+            const cycle = await parseIndividualCycleFileSafely(fullPath, file);
+            processedIndividualFiles.add(fullPath);
+
+            if (cycle) {
+              const { inserted, skipped } = await insertCyclesToPostgres(wrench, [cycle]);
+              rowsAdded += inserted;
+              dupsSkipped += skipped;
+              if (inserted > 0) {
+                console.log(`   -> [${wrench.wrench_id}] ${file}: Ingested pulse=${cycle.pulseCount}, torque=${cycle.torque} N·m.`);
+              }
+            }
+
+            await sleep(30);
+          }
+        }
+
+        await sleep(150);
+      }
+    }
+  }
+
+  return { rowsAdded, dupsSkipped, filesChecked, toolFoldersFound };
+}
+
+/**
+ * Fallback: Pull from Upstream APIs on server 10.82.126.73 (which already has /mnt/ mounts)
+ */
+async function pullFromUpstreamServerApis(dateKey) {
+  let rowsAdded = 0;
+  let dupsSkipped = 0;
+  let filesChecked = 0;
+
+  for (const wrench of ALL_WRENCH_ASSETS) {
+    try {
+      const apiUrl = wrench.brand === 'URYU' ? `${URYU_API_URL}/api/torque-data` : `${YOKOTA_API_URL}/api/yokota-data`;
+      const res = await axios.get(apiUrl, {
+        params: { station: wrench.station, folder: wrench.folder, date: dateKey },
+        timeout: 1500
+      });
+
+      const rawRows = Array.isArray(res.data) ? res.data : (Array.isArray(res.data?.data) ? res.data.data : []);
+      if (rawRows.length > 0) {
+        filesChecked++;
+        const cycles = rawRows.map(r => ({
+          tighteningTime: r['Tightening date/time'] || r.timestamp || new Date().toISOString(),
+          receptionTime: r['Reception date/time'] || r.timestamp || new Date().toISOString(),
+          workNo: r['WorkNO.'] || r.barcode || '1',
+          pulseCount: parseInt(r['Number of pulses'] || r.pulses || 0, 10),
+          torque: parseFloat(r['Torque'] || r.torque || wrench.approved_torque_target || 20.0),
+          angle: parseFloat(r['Angle'] || r.angle || 45.0),
+          judgement: (r['Judgement'] || r.judgement || 'OK').toUpperCase(),
+          cycleCounter: parseInt(r['Count'] || r.work_no || '1', 10) || 1
+        }));
+
+        const { inserted, skipped } = await insertCyclesToPostgres(wrench, cycles);
+        rowsAdded += inserted;
+        dupsSkipped += skipped;
+      }
+    } catch (apiErr) {
+      // Handled
+    }
+
+    await sleep(40);
+  }
+
+  return { rowsAdded, dupsSkipped, filesChecked };
+}
+
+/**
  * Main Pull Routine:
- * ULTRA-LOW-IMPACT THROTTLED INGESTION:
- * - Automatically connects to \\172.16.105.234\DATA / Z:\
- * - Targets ONLY today's date folder (YYYYMMDD)
- * - Micro-buffer reads Line 3 of new cycle files
- * - Paces reads with 30ms sleep per file and 150ms sleep per folder
- * - Zero risk of freezing the production line PC
+ * Checks /mnt/torque_wrench (URYU) and /mnt/yokota (YOKOTA) on 10.82.126.73
+ * Falls back to Windows UNC shares \\172.16.105.234\D & \\172.16.105.234\c, or server APIs.
+ * Inserts parsed cycles into PostgreSQL on 10.82.126.44.
  */
 async function runCsvPullJob() {
   const startTime = new Date();
   const dateKeys = getDateKeys(startTime);
 
   console.log(`\n================================================================`);
-  console.log(`🛡️  [Stealth CSV Ingestion] Checking shop-floor PC for date: ${dateKeys.compact}`);
-  console.log(`    Mode: Ultra-low I/O throttle (Zero production risk)`);
+  console.log(`🛡️  [Stealth CSV Ingestion] Pulling shop-floor telemetry for: ${dateKeys.compact}`);
+  console.log(`    Target Server: PostgreSQL on 10.82.126.44 (DB: enginetracking)`);
   console.log(`================================================================`);
 
   lastSyncStats.status = 'RUNNING';
   lastSyncStats.lastRunTimestamp = startTime.toISOString();
   lastSyncStats.error = null;
 
-  // 1. Auto-connect / verify network share
-  const netAccess = await ensureNetworkAccess();
-  if (!netAccess.ok) {
-    const msg = `Shop-floor PC share is currently offline: ${netAccess.error}`;
-    lastSyncStats.status = 'WAITING_MOUNT';
-    lastSyncStats.error = msg;
-    console.log(`ℹ️ [CSV Ingestion Note]: ${msg}`);
-    return { success: false, reason: msg };
-  }
+  // 1. Resolve active URYU mount path
+  const activeUryu = await resolveAccessiblePath([URYU_MOUNT_PATH, URYU_UNC_SHARE, FALLBACK_MOUNT]);
+  // 2. Resolve active YOKOTA mount path
+  const activeYokota = await resolveAccessiblePath([YOKOTA_MOUNT_PATH, YOKOTA_UNC_SHARE]);
 
-  const activeMount = netAccess.activePath;
-  lastSyncStats.activeMountPath = activeMount;
+  lastSyncStats.activeUryuSource = activeUryu;
+  lastSyncStats.activeYokotaSource = activeYokota;
 
-  try {
-    const searchRoots = await discoverRootDirectories(activeMount);
-    let totalRowsAdded = 0;
-    let totalDuplicatesSkipped = 0;
-    let totalFilesChecked = 0;
-    let toolFoldersCount = 0;
+  let totalRowsAdded = 0;
+  let totalDuplicatesSkipped = 0;
+  let totalFilesChecked = 0;
+  let totalToolFolders = 0;
 
-    for (const rootDir of searchRoots) {
-      let entries = [];
-      try {
-        entries = await fsp.readdir(rootDir, { withFileTypes: true });
-      } catch (err) {
-        continue;
-      }
-
-      // Tool folders (e.g. "029", "019", "016", "0103", "0250", etc.)
-      const folderCandidates = entries.filter(e => e.isDirectory() && /^\d+$/.test(e.name));
-
-      for (const fEntry of folderCandidates) {
-        const folderNumber = fEntry.name;
-        const toolDir = path.join(rootDir, folderNumber);
-
-        // Candidate date directories for today only
-        const dateSubfolders = [
-          path.join(toolDir, 'UEC-4800', dateKeys.compact),
-          path.join(toolDir, dateKeys.compact),
-          path.join(toolDir, 'UEC-4800', dateKeys.dashes)
-        ];
-
-        // Check Yokota IP subfolder like 120_0_100_*
-        try {
-          const subEntries = await fsp.readdir(toolDir, { withFileTypes: true });
-          for (const sub of subEntries) {
-            if (sub.isDirectory() && (sub.name.startsWith('120_') || sub.name.toUpperCase() === 'YOKOTA')) {
-              dateSubfolders.push(path.join(toolDir, sub.name, dateKeys.compact));
-            }
-          }
-        } catch (subErr) {}
-
-        for (const activeDateDir of dateSubfolders) {
-          const dirExists = await fsp.access(activeDateDir).then(() => true).catch(() => false);
-          if (!dirExists) continue;
-
-          toolFoldersCount++;
-          let files = [];
-          try {
-            files = await fsp.readdir(activeDateDir);
-          } catch (readDirErr) {
-            continue;
-          }
-
-          const csvFiles = files.filter(f => f.toLowerCase().endsWith('.csv'));
-
-          for (const file of csvFiles) {
-            const fullPath = path.join(activeDateDir, file);
-
-            // Instant skip if already processed (never open, never stat)
-            if (processedIndividualFiles.has(fullPath)) {
-              continue;
-            }
-
-            totalFilesChecked++;
-            const wrench = resolveWrench(folderNumber, null, file);
-            if (!wrench) continue;
-
-            // Summary CSV
-            if (file.startsWith('F-Data') || file.toLowerCase().includes('summary') || file.toLowerCase().includes('tightening')) {
-              const summaryRows = await parseSummaryCsvFileSafely(fullPath);
-              if (summaryRows.length > 0) {
-                const { inserted, skipped } = await insertCyclesToPostgres(wrench, summaryRows);
-                totalRowsAdded += inserted;
-                totalDuplicatesSkipped += skipped;
-                if (inserted > 0) {
-                  console.log(`   -> [${wrench.wrench_id}] ${file}: +${inserted} new cycles saved.`);
-                }
-              }
-            } else if (/^\d{8,}/.test(file)) {
-              // Individual cycle CSV: read Line 3 micro-buffer
-              const cycle = await parseIndividualCycleFileSafely(fullPath, file);
-              processedIndividualFiles.add(fullPath);
-
-              if (cycle) {
-                const { inserted, skipped } = await insertCyclesToPostgres(wrench, [cycle]);
-                totalRowsAdded += inserted;
-                totalDuplicatesSkipped += skipped;
-                if (inserted > 0) {
-                  console.log(`   -> [${wrench.wrench_id}] ${file}: Ingested pulse=${cycle.pulseCount}, torque=${cycle.torque} N·m.`);
-                }
-              }
-
-              // Throttle: 30ms pause after reading an individual file
-              await sleep(30);
-            }
-          }
-
-          // Throttle: 150ms pause between tool folders to protect remote PC CPU
-          await sleep(150);
-        }
-      }
+  // If filesystem mount is accessible directly
+  if (activeUryu || activeYokota) {
+    if (activeUryu) {
+      console.log(`📂 [URYU Source Active]: ${activeUryu}`);
+      const resU = await scanAndIngestMountRoot(activeUryu, dateKeys);
+      totalRowsAdded += resU.rowsAdded;
+      totalDuplicatesSkipped += resU.dupsSkipped;
+      totalFilesChecked += resU.filesChecked;
+      totalToolFolders += resU.toolFoldersFound;
     }
 
-    const durationMs = Date.now() - startTime.getTime();
-    lastSyncStats.toolFoldersFound = toolFoldersCount;
-    lastSyncStats.filesProcessed = totalFilesChecked;
-    lastSyncStats.rowsIngested = totalRowsAdded;
-    lastSyncStats.duplicatesSkipped = totalDuplicatesSkipped;
-    lastSyncStats.status = 'COMPLETED';
-
-    console.log(`✅ [Stealth CSV Ingestion Done in ${durationMs}ms]`);
-    console.log(`   Folders: ${toolFoldersCount} | Files Checked: ${totalFilesChecked} | New Saved: ${totalRowsAdded} | Clubbed: ${totalDuplicatesSkipped}`);
-    console.log(`================================================================\n`);
-
-    return {
-      success: true,
-      toolFoldersCount,
-      filesProcessed: totalFilesChecked,
-      rowsIngested: totalRowsAdded,
-      duplicatesSkipped: totalDuplicatesSkipped,
-      durationMs
-    };
-  } catch (err) {
-    lastSyncStats.status = 'ERROR';
-    lastSyncStats.error = err.message;
-    console.error(`❌ [Stealth CSV Ingestion Error]:`, err.message);
-    return { success: false, error: err.message };
+    if (activeYokota) {
+      console.log(`📂 [YOKOTA Source Active]: ${activeYokota}`);
+      const resY = await scanAndIngestMountRoot(activeYokota, dateKeys);
+      totalRowsAdded += resY.rowsAdded;
+      totalDuplicatesSkipped += resY.dupsSkipped;
+      totalFilesChecked += resY.filesChecked;
+      totalToolFolders += resY.toolFoldersFound;
+    }
+  } else {
+    // If running remotely without local /mnt, pull from server 10.82.126.73 APIs
+    console.log(`📡 [Direct Mounts Not Local]: Connecting to server 10.82.126.73 APIs (reading /mnt mounts)...`);
+    const resApi = await pullFromUpstreamServerApis(dateKeys.compact);
+    totalRowsAdded += resApi.rowsAdded;
+    totalDuplicatesSkipped += resApi.dupsSkipped;
+    totalFilesChecked += resApi.filesChecked;
   }
+
+  const durationMs = Date.now() - startTime.getTime();
+  lastSyncStats.toolFoldersFound = totalToolFolders;
+  lastSyncStats.filesProcessed = totalFilesChecked;
+  lastSyncStats.rowsIngested = totalRowsAdded;
+  lastSyncStats.duplicatesSkipped = totalDuplicatesSkipped;
+  lastSyncStats.status = 'COMPLETED';
+
+  console.log(`✅ [Stealth CSV Ingestion Completed in ${durationMs}ms]`);
+  console.log(`   Files Checked: ${totalFilesChecked} | New Saved to PostgreSQL: ${totalRowsAdded} | Clubbed: ${totalDuplicatesSkipped}`);
+  console.log(`================================================================\n`);
+
+  return {
+    success: true,
+    uryuSource: activeUryu || URYU_API_URL,
+    yokotaSource: activeYokota || YOKOTA_API_URL,
+    filesProcessed: totalFilesChecked,
+    rowsIngested: totalRowsAdded,
+    duplicatesSkipped: totalDuplicatesSkipped,
+    durationMs
+  };
 }
 
 function getCsvIngestionStatus() {
   const pg = getPostgresStatus();
   return {
     ...lastSyncStats,
-    mountPath: DATA_MOUNT_PATH,
-    localDrive: LOCAL_MOUNT_DRIVE,
+    uryuPath: URYU_MOUNT_PATH,
+    yokotaPath: YOKOTA_MOUNT_PATH,
+    uryuUnc: URYU_UNC_SHARE,
+    yokotaUnc: YOKOTA_UNC_SHARE,
     postgresServer: `${pg.host}:${pg.port}`,
     postgresConnected: pg.connected,
     postgresTableReady: pg.tablesReady,
@@ -644,7 +681,7 @@ function getCsvIngestionStatus() {
 module.exports = {
   runCsvPullJob,
   resolveWrench,
-  ensureNetworkAccess,
   getCsvIngestionStatus,
-  DATA_MOUNT_PATH
+  URYU_MOUNT_PATH,
+  YOKOTA_MOUNT_PATH
 };
