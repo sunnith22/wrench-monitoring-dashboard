@@ -1,6 +1,3 @@
-/**
- * Statistical Analytics Engine for TNGA Impact Wrench Dashboard
- */
 
 function calculateWrenchAnalytics(records, thresholdMax) {
   if (!records || records.length === 0) {

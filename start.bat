@@ -10,6 +10,13 @@ echo Freeing ports 8140 and 3010 if occupied by previous sessions...
 for /f "tokens=5" %%a in ('netstat -aon ^| findstr :8140') do taskkill /f /pid %%a >nul 2>&1
 for /f "tokens=5" %%a in ('netstat -aon ^| findstr :3010') do taskkill /f /pid %%a >nul 2>&1
 
+echo.
+echo Checking connection to Shop-Floor Line PC (\\172.16.105.234\DATA)...
+if not exist Z:\ (
+    echo Auto-connecting network share to Z: drive...
+    net use Z: \\172.16.105.234\DATA /persistent:yes >nul 2>&1
+)
+
 echo 1/2. Starting Backend API on Port 8140...
 start "TNGA Backend (Port 8140)" cmd /k "cd backend && npm start"
 
