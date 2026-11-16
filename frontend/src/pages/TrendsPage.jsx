@@ -270,12 +270,14 @@ export default function TrendsPage() {
           )}
 
           {/* Days Range Selector (Default: 8 Days from user sketch) */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
             <span style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-muted)' }}>
               Timeframe:
             </span>
             {[
-              { days: 8, label: '8 Days (Standard)' },
+              { days: 7, label: '7 Days' },
+              { days: 8, label: '8 Days (Std)' },
+              { days: 9, label: '9 Days' },
               { days: 14, label: '14 Days' },
               { days: 30, label: '30 Days' }
             ].map(item => (
@@ -296,6 +298,33 @@ export default function TrendsPage() {
                 {item.label}
               </button>
             ))}
+
+            {/* Custom Days Input */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '4px', marginLeft: '6px' }}>
+              <input
+                type="number"
+                min="1"
+                max="90"
+                value={selectedDays}
+                onChange={(e) => {
+                  const val = parseInt(e.target.value, 10);
+                  if (val > 0 && val <= 90) setSelectedDays(val);
+                }}
+                style={{
+                  width: '52px',
+                  padding: '4px 6px',
+                  fontSize: '12px',
+                  fontWeight: 700,
+                  textAlign: 'center',
+                  borderRadius: '6px',
+                  border: '1px solid var(--border-color)',
+                  color: 'var(--text-primary)',
+                  background: '#ffffff'
+                }}
+                title="Enter custom number of days (1-90)"
+              />
+              <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>days</span>
+            </div>
           </div>
         </div>
       </div>
