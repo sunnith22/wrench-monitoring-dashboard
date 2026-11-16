@@ -1,7 +1,7 @@
 require('dotenv').config();
+const fs = require('fs');
+const path = require('path');
 const { Pool } = require('pg');
-const axios = require('axios');
-const mongoose = require('mongoose');
 
 const POSTGRES_USER = process.env.POSTGRES_USER || 'tracedb';
 const POSTGRES_HOST = process.env.POSTGRES_HOST || '10.82.126.44';
@@ -9,18 +9,19 @@ const POSTGRES_DB = process.env.POSTGRES_DB || 'enginetracking';
 const POSTGRES_PASSWORD = process.env.POSTGRES_PASSWORD || 'Toyota_2022';
 const POSTGRES_PORT = parseInt(process.env.POSTGRES_PORT || '5432', 10);
 
-const URYU_API_URL = process.env.FINALDB_API_URL || 'http://10.82.126.73:8121';
-const YOKOTA_API_URL = process.env.YOKOTA_API_URL || 'http://10.82.126.73:8127';
-const MONGO_URI = process.env.MONGO_URI || 'mongodb://10.82.126.73:27017/tnga_wrench_monitoring';
+const URYU_MOUNT_PATH = process.env.URYU_MOUNT_PATH || '/mnt/torque_wrench';
+const YOKOTA_MOUNT_PATH = process.env.YOKOTA_MOUNT_PATH || '/mnt/yokota';
+const URYU_UNC_SHARE = process.env.URYU_UNC_SHARE || '\\\\172.16.105.234\\D';
+const YOKOTA_UNC_SHARE = process.env.YOKOTA_UNC_SHARE || '\\\\172.16.105.234\\c';
 
 async function runDiagnostic() {
   console.log('================================================================');
   console.log('   TOYOTA INDUSTRIES ENGINE INDIA (TIEI) - SYSTEM DIAGNOSTICS   ');
-  console.log('   TNGA Impact Wrench Monitoring & Telemetry Infrastructure     ');
+  console.log('   TNGA Impact Wrench Telemetry & Storage Verification          ');
   console.log('================================================================\n');
 
   console.log('Timestamp:', new Date().toISOString());
-  console.log('Testing connectivity across plant endpoints...\n');
+  console.log('Testing connectivity across plant infrastructure...\n');
 
   // 1. PostgreSQL Diagnostic
   console.log('----------------------------------------------------------------');
@@ -38,91 +39,72 @@ async function runDiagnostic() {
 
   let pgClient = null;
   let pgConnected = false;
+  let pgCyclesCount = 0;
   let pgCyclesTableExists = false;
 
   try {
     pgClient = await pool.connect();
     pgConnected = true;
-    console.log(`✅ [PostgreSQL] TCP Connection & Authentication SUCCESSFUL as '${POSTGRES_USER}'`);
+    console.log(`✅ [PostgreSQL] Connected successfully to ${POSTGRES_HOST}:${POSTGRES_PORT} as '${POSTGRES_USER}'`);
 
     const resCycles = await pgClient.query("SELECT to_regclass('public.wrench_tightening_cycles') as tbl_exists;");
     pgCyclesTableExists = Boolean(resCycles.rows[0]?.tbl_exists);
 
     if (pgCyclesTableExists) {
       const countRes = await pgClient.query("SELECT COUNT(*) as cnt FROM wrench_tightening_cycles;");
-      console.log(`✅ [PostgreSQL] Table 'wrench_tightening_cycles' EXISTS (Total rows: ${countRes.rows[0].cnt})`);
+      pgCyclesCount = parseInt(countRes.rows[0].cnt, 10);
+      console.log(`✅ [PostgreSQL] Table 'wrench_tightening_cycles' verified (Total rows: ${pgCyclesCount})`);
     } else {
-      console.log(`ℹ️ [PostgreSQL] Table 'wrench_tightening_cycles' not yet created.`);
+      console.log(`ℹ️ [PostgreSQL] Table 'wrench_tightening_cycles' not yet created. It will auto-create on backend startup.`);
     }
   } catch (err) {
-    console.log(`ℹ️ [PostgreSQL Status]: ${err.message}`);
+    console.log(`❌ [PostgreSQL Error]: ${err.message}`);
     if (err.message.includes('ECONNREFUSED')) {
-      console.log(`   -> PostgreSQL server on ${POSTGRES_HOST}:${POSTGRES_PORT} is currently not running or unreachable.`);
-      console.log(`   -> Application will automatically pull directly from the LIVE Line PC at ${URYU_API_URL}.`);
+      console.log(`   -> Cannot reach ${POSTGRES_HOST}:${POSTGRES_PORT}. Verify network routing and firewall.`);
     }
   } finally {
     if (pgClient) pgClient.release();
-    await pool.end();
+    await pool.end().catch(() => {});
   }
 
-  // 2. Shop-Floor Line PC APIs
+  // 2. Mount Point & UNC Share Diagnostics
   console.log('\n----------------------------------------------------------------');
-  console.log(`2. Testing Shop-Floor Line PC APIs`);
+  console.log(`2. Testing Shop-Floor Data Sources (Mount Points & Shares)`);
   console.log('----------------------------------------------------------------');
 
-  let uryuLiveCount = 0;
-  let sampleRecord = null;
-  const todayKey = new Date().toISOString().split('T')[0].replace(/-/g, '');
-
-  try {
-    const res = await axios.get(`${URYU_API_URL}/api/torque-data`, {
-      params: { station: '28', folder: '016', date: todayKey },
-      timeout: 3000
-    });
-    const rows = Array.isArray(res.data) ? res.data : (Array.isArray(res.data?.data) ? res.data.data : []);
-    uryuLiveCount = rows.length;
-    sampleRecord = rows[0] || null;
-    console.log(`✅ [URYU Line PC] Connected to ${URYU_API_URL}/api/torque-data (HTTP ${res.status})`);
-    console.log(`   -> Station 28 / Folder 016 records for date ${todayKey}: ${uryuLiveCount} cycles`);
-    if (sampleRecord) {
-      console.log(`   -> Sample Tightening: WorkNO=${sampleRecord['WorkNO.'] || 'N/A'}, Pulses=${sampleRecord['Number of pulses']}, Torque=${sampleRecord['Torque']} N·m`);
+  function checkPath(label, targetPath) {
+    try {
+      if (fs.existsSync(targetPath)) {
+        const items = fs.readdirSync(targetPath);
+        console.log(`✅ [${label}] Accessible: ${targetPath} (${items.length} items found)`);
+        return true;
+      } else {
+        console.log(`ℹ️ [${label}] Not mounted or not found at: ${targetPath}`);
+        return false;
+      }
+    } catch (err) {
+      console.log(`⚠️ [${label}] Error accessing ${targetPath}: ${err.message}`);
+      return false;
     }
-  } catch (err) {
-    console.log(`⚠️ [URYU Line PC] ${URYU_API_URL} (${err.message})`);
   }
 
-  try {
-    const res = await axios.get(`${YOKOTA_API_URL}/api/yokota-data`, {
-      params: { station: '58', folder: '0250', date: todayKey },
-      timeout: 1500
-    });
-    console.log(`✅ [Yokota Line PC] Connected to ${YOKOTA_API_URL}/api/yokota-data (HTTP ${res.status})`);
-  } catch (err) {
-    console.log(`ℹ️ [Yokota Line PC] Offline or Unreachable: ${YOKOTA_API_URL} (${err.message})`);
-  }
+  console.log('Checking Linux Mounts:');
+  const uryuMountOk = checkPath('URYU Linux Mount', URYU_MOUNT_PATH);
+  const yokotaMountOk = checkPath('YOKOTA Linux Mount', YOKOTA_MOUNT_PATH);
 
-  // 3. MongoDB Diagnostic
-  console.log('\n----------------------------------------------------------------');
-  console.log(`3. Testing MongoDB Asset Store: ${MONGO_URI}`);
-  console.log('----------------------------------------------------------------');
+  console.log('\nChecking Windows UNC Shares (for Windows host):');
+  const uryuUncOk = checkPath('URYU Windows UNC', URYU_UNC_SHARE);
+  const yokotaUncOk = checkPath('YOKOTA Windows UNC', YOKOTA_UNC_SHARE);
 
-  let mongoConnected = false;
-  try {
-    await mongoose.connect(MONGO_URI, { serverSelectionTimeoutMS: 2000 });
-    mongoConnected = true;
-    console.log(`✅ [MongoDB] Connected successfully.`);
-    await mongoose.disconnect();
-  } catch (err) {
-    console.log(`ℹ️ [MongoDB Note] Unreachable: ${err.message} (Fallback memory store active)`);
-  }
-
+  // Summary
   console.log('\n================================================================');
   console.log('                    DIAGNOSTIC SUMMARY                          ');
   console.log('================================================================');
-  console.log(`PostgreSQL TCP Connected:   ${pgConnected ? 'YES' : 'NO (Refused - Live API will be used)'}`);
-  console.log(`Shop-Floor URYU Line PC:    ${uryuLiveCount > 0 ? `ONLINE (Live data active: ${uryuLiveCount} cycles today)` : 'ONLINE (Waiting for shift cycles)'}`);
-  console.log(`MongoDB Asset Store:        ${mongoConnected ? 'ONLINE' : 'FALLBACK'}`);
-  console.log(`Main Dashboard Status:      READY (All 73 tools active & monitored)`);
+  console.log(`PostgreSQL Server (10.82.126.44): ${pgConnected ? 'CONNECTED ✅' : 'OFFLINE ❌'}`);
+  console.log(`Cycles Table Active:              ${pgCyclesTableExists ? `YES (${pgCyclesCount} cycles stored) ✅` : 'PENDING INIT ℹ️'}`);
+  console.log(`URYU Data Source Available:       ${(uryuMountOk || uryuUncOk) ? 'YES ✅' : 'OFFLINE (Check mount) ⚠️'}`);
+  console.log(`YOKOTA Data Source Available:     ${(yokotaMountOk || yokotaUncOk) ? 'YES ✅' : 'OFFLINE (Check mount) ⚠️'}`);
+  console.log(`Main Dashboard Telemetry Source:  PostgreSQL (10.82.126.44)`);
   console.log('================================================================\n');
 }
 

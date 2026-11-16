@@ -47,10 +47,6 @@ const URYU_UNC_SHARE = process.env.URYU_UNC_SHARE || '\\\\172.16.105.234\\D';
 const YOKOTA_UNC_SHARE = process.env.YOKOTA_UNC_SHARE || '\\\\172.16.105.234\\c';
 const FALLBACK_MOUNT = process.env.DATA_MOUNT_PATH || 'Z:\\';
 
-// Upstream Server APIs on 10.82.126.73
-const URYU_API_URL = process.env.FINALDB_API_URL || 'http://10.82.126.73:8121';
-const YOKOTA_API_URL = process.env.YOKOTA_API_URL || 'http://10.82.126.73:8127';
-
 // Memory trackers to prevent redundant re-reading
 const fileLineTracker = new Map();
 const processedIndividualFiles = new Set();
@@ -538,54 +534,10 @@ async function scanAndIngestMountRoot(mountRoot, dateKeys) {
 }
 
 /**
- * Fallback: Pull from Upstream APIs on server 10.82.126.73 (which already has /mnt/ mounts)
- */
-async function pullFromUpstreamServerApis(dateKey) {
-  let rowsAdded = 0;
-  let dupsSkipped = 0;
-  let filesChecked = 0;
-
-  for (const wrench of ALL_WRENCH_ASSETS) {
-    try {
-      const apiUrl = wrench.brand === 'URYU' ? `${URYU_API_URL}/api/torque-data` : `${YOKOTA_API_URL}/api/yokota-data`;
-      const res = await axios.get(apiUrl, {
-        params: { station: wrench.station, folder: wrench.folder, date: dateKey },
-        timeout: 1500
-      });
-
-      const rawRows = Array.isArray(res.data) ? res.data : (Array.isArray(res.data?.data) ? res.data.data : []);
-      if (rawRows.length > 0) {
-        filesChecked++;
-        const cycles = rawRows.map(r => ({
-          tighteningTime: r['Tightening date/time'] || r.timestamp || new Date().toISOString(),
-          receptionTime: r['Reception date/time'] || r.timestamp || new Date().toISOString(),
-          workNo: r['WorkNO.'] || r.barcode || '1',
-          pulseCount: parseInt(r['Number of pulses'] || r.pulses || 0, 10),
-          torque: parseFloat(r['Torque'] || r.torque || wrench.approved_torque_target || 20.0),
-          angle: parseFloat(r['Angle'] || r.angle || 45.0),
-          judgement: (r['Judgement'] || r.judgement || 'OK').toUpperCase(),
-          cycleCounter: parseInt(r['Count'] || r.work_no || '1', 10) || 1
-        }));
-
-        const { inserted, skipped } = await insertCyclesToPostgres(wrench, cycles);
-        rowsAdded += inserted;
-        dupsSkipped += skipped;
-      }
-    } catch (apiErr) {
-      // Handled
-    }
-
-    await sleep(40);
-  }
-
-  return { rowsAdded, dupsSkipped, filesChecked };
-}
-
-/**
  * Main Pull Routine:
- * Checks /mnt/torque_wrench (URYU) and /mnt/yokota (YOKOTA) on 10.82.126.73
- * Falls back to Windows UNC shares \\172.16.105.234\D & \\172.16.105.234\c, or server APIs.
- * Inserts parsed cycles into PostgreSQL on 10.82.126.44.
+ * Reads /mnt/torque_wrench (URYU) and /mnt/yokota (YOKOTA) on server 10.82.126.73
+ * Falls back to Windows UNC shares \\172.16.105.234\D & \\172.16.105.234\c if running on Windows.
+ * Inserts parsed cycles directly into PostgreSQL on 10.82.126.44.
  */
 async function runCsvPullJob() {
   const startTime = new Date();
@@ -593,6 +545,7 @@ async function runCsvPullJob() {
 
   console.log(`\n================================================================`);
   console.log(`🛡️  [Stealth CSV Ingestion] Pulling shop-floor telemetry for: ${dateKeys.compact}`);
+  console.log(`    Data Source: Mount Points /mnt/torque_wrench & /mnt/yokota`);
   console.log(`    Target Server: PostgreSQL on 10.82.126.44 (DB: enginetracking)`);
   console.log(`================================================================`);
 
@@ -633,12 +586,8 @@ async function runCsvPullJob() {
       totalToolFolders += resY.toolFoldersFound;
     }
   } else {
-    // If running remotely without local /mnt, pull from server 10.82.126.73 APIs
-    console.log(`📡 [Direct Mounts Not Local]: Connecting to server 10.82.126.73 APIs (reading /mnt mounts)...`);
-    const resApi = await pullFromUpstreamServerApis(dateKeys.compact);
-    totalRowsAdded += resApi.rowsAdded;
-    totalDuplicatesSkipped += resApi.dupsSkipped;
-    totalFilesChecked += resApi.filesChecked;
+    console.warn(`⚠️ [Mounts Inaccessible]: Neither ${URYU_MOUNT_PATH} nor ${YOKOTA_MOUNT_PATH} found.`);
+    console.warn(`   Verify mount status using: ls -la /mnt/torque_wrench /mnt/yokota`);
   }
 
   const durationMs = Date.now() - startTime.getTime();
@@ -654,8 +603,8 @@ async function runCsvPullJob() {
 
   return {
     success: true,
-    uryuSource: activeUryu || URYU_API_URL,
-    yokotaSource: activeYokota || YOKOTA_API_URL,
+    uryuSource: activeUryu || 'NOT_MOUNTED',
+    yokotaSource: activeYokota || 'NOT_MOUNTED',
     filesProcessed: totalFilesChecked,
     rowsIngested: totalRowsAdded,
     duplicatesSkipped: totalDuplicatesSkipped,

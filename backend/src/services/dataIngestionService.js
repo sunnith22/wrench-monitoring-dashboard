@@ -1,42 +1,5 @@
-const axios = require('axios');
 const crypto = require('crypto');
 const { query, localFallbackCycles } = require('../config/postgresDB');
-
-const URYU_API_URL = process.env.FINALDB_API_URL || 'http://10.82.126.73:8121';
-const YOKOTA_API_URL = process.env.YOKOTA_API_URL || 'http://10.82.126.73:8127';
-
-let upstreamChecked = false;
-let isUpstreamAlive = false;
-let lastUpstreamCheckTime = 0;
-
-/**
- * Fast ping to check if shop-floor PC is reachable without hanging individual tool requests
- */
-async function checkUpstreamAvailability() {
-  const now = Date.now();
-  if (upstreamChecked && (now - lastUpstreamCheckTime < 30000)) {
-    return isUpstreamAlive;
-  }
-
-  try {
-    lastUpstreamCheckTime = now;
-    await axios.get(`${URYU_API_URL}/api/torque-data`, {
-      params: { station: '28', folder: '016' },
-      timeout: 1000
-    });
-    isUpstreamAlive = true;
-    upstreamChecked = true;
-  } catch (err) {
-    if (err.response) {
-      isUpstreamAlive = true;
-    } else {
-      isUpstreamAlive = false;
-    }
-    upstreamChecked = true;
-  }
-
-  return isUpstreamAlive;
-}
 
 /**
  * Generate a unique deterministic composite key for deduplication
@@ -158,28 +121,7 @@ async function fetchWrenchOperations(wrenchAsset, dateStr) {
     }));
   }
 
-  // 3. Fallback: Check Line PC API only if explicitly configured and upstream check is fast
-  if (process.env.ENABLE_UPSTREAM_HTTP_FALLBACK === 'true') {
-    try {
-      const isAlive = await checkUpstreamAvailability();
-      if (isAlive) {
-        if (wrenchAsset.brand === 'URYU') {
-          const response = await axios.get(`${URYU_API_URL}/api/torque-data`, {
-            params: { station: wrenchAsset.station, folder: wrenchAsset.folder, date: dateKey },
-            timeout: 1000
-          });
-          const rows = Array.isArray(response.data) ? response.data : (Array.isArray(response.data?.data) ? response.data.data : []);
-          if (rows.length > 0) {
-            const normalized = normalizeRecords(rows, wrenchAsset, targetDate);
-            cacheLiveRecords(normalized);
-            return normalized;
-          }
-        }
-      }
-    } catch (ignore) {}
-  }
-
-  // 4. Return empty array if no genuine data yet (strictly NO synthetic dummy data)
+  // 3. Return empty array if no genuine records found in PostgreSQL or local cache
   return [];
 }
 
