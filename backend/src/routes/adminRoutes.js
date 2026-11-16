@@ -3,7 +3,6 @@ const router = express.Router();
 const configService = require('../services/configService');
 const { runSyncPass, getSyncStatus } = require('../services/shiftSyncWorker');
 const { sendTestEmail, getEmailHistory } = require('../services/emailService');
-const { runHistoricalBackfillJob } = require('../services/csvIngestionService');
 
 // Hardcoded Default Admin Credentials (can be configured via ENV)
 const ADMIN_USER = process.env.ADMIN_USER || 'admin';
@@ -106,23 +105,11 @@ router.delete('/schedule/:id', requireAdminAuth, (req, res) => {
   }
 });
 
-// Force Instant Trigger (Today Only)
+// Force Instant Trigger
 router.post('/schedule/trigger-now', requireAdminAuth, async (req, res) => {
   try {
     configService.recordAudit('MANUAL_SYNC_TRIGGERED', 'Manual data extraction initiated via Admin Portal', req.adminUser);
     const result = await runSyncPass(`Admin Manual Trigger (${req.adminUser})`);
-    res.json({ success: true, result });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-// Initial One-Time Historical Backfill (Past N days, default 8)
-router.post('/schedule/backfill-history', requireAdminAuth, async (req, res) => {
-  try {
-    const days = parseInt(req.body.days || 8, 10);
-    configService.recordAudit('HISTORICAL_BACKFILL_TRIGGERED', `Initiated ${days}-day historical backfill into PostgreSQL`, req.adminUser);
-    const result = await runHistoricalBackfillJob(days);
     res.json({ success: true, result });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
