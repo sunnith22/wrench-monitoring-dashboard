@@ -582,17 +582,20 @@ async function pullFromUpstreamServerApis(dateKey) {
 }
 
 /**
- * Main Pull Routine:
+ * Main Pull Routine for a specific date:
  * Checks /mnt/torque_wrench (URYU) and /mnt/yokota (YOKOTA) on 10.82.126.73
  * Falls back to Windows UNC shares \\172.16.105.234\D & \\172.16.105.234\c, or server APIs.
  * Inserts parsed cycles into PostgreSQL on 10.82.126.44.
  */
-async function runCsvPullJob() {
+async function runCsvPullJob(targetDateInput = null) {
   const startTime = new Date();
-  const dateKeys = getDateKeys(startTime);
+  const targetDate = targetDateInput instanceof Date
+    ? targetDateInput
+    : (targetDateInput ? new Date(targetDateInput) : startTime);
+  const dateKeys = getDateKeys(targetDate);
 
   console.log(`\n================================================================`);
-  console.log(`🛡️  [Stealth CSV Ingestion] Pulling shop-floor telemetry for: ${dateKeys.compact}`);
+  console.log(`🛡️  [Stealth CSV Ingestion] Pulling shop-floor telemetry for: ${dateKeys.compact} (${dateKeys.dashes})`);
   console.log(`    Target Server: PostgreSQL on 10.82.126.44 (DB: enginetracking)`);
   console.log(`================================================================`);
 
@@ -654,12 +657,60 @@ async function runCsvPullJob() {
 
   return {
     success: true,
+    date: dateKeys.compact,
     uryuSource: activeUryu || URYU_API_URL,
     yokotaSource: activeYokota || YOKOTA_API_URL,
     filesProcessed: totalFilesChecked,
     rowsIngested: totalRowsAdded,
     duplicatesSkipped: totalDuplicatesSkipped,
     durationMs
+  };
+}
+
+/**
+ * Initial One-Time Historical Backfill:
+ * Pulls past N days (e.g. past 8 days) sequentially from the mount/APIs
+ * to seed PostgreSQL on 10.82.126.44 with true historical multi-day trends.
+ * Once inserted, data remains in PostgreSQL permanently.
+ */
+async function runHistoricalBackfillJob(daysCount = 8) {
+  console.log(`\n================================================================`);
+  console.log(`📜 [Initial Historical Backfill] Pulling past ${daysCount} days into PostgreSQL...`);
+  console.log(`    Target Server: 10.82.126.44 | Mode: Sequential Throttled (Zero PC Load)`);
+  console.log(`================================================================`);
+
+  const results = [];
+  const today = new Date();
+  let totalHistoricalSaved = 0;
+  let totalHistoricalClubbed = 0;
+
+  for (let i = daysCount - 1; i >= 0; i--) {
+    const targetDate = new Date(today);
+    targetDate.setDate(today.getDate() - i);
+    const dateKeys = getDateKeys(targetDate);
+
+    console.log(`\n📅 [Day ${daysCount - i}/${daysCount}] Ingesting historical date: ${dateKeys.compact} (${dateKeys.dashes})...`);
+    const dayRes = await runCsvPullJob(targetDate);
+
+    totalHistoricalSaved += dayRes.rowsIngested || 0;
+    totalHistoricalClubbed += dayRes.duplicatesSkipped || 0;
+    results.push(dayRes);
+
+    // 400ms pause between historical days to ensure zero pressure on the shop-floor PC
+    await sleep(400);
+  }
+
+  console.log(`\n================================================================`);
+  console.log(`🎉 [Historical Backfill Complete] ${daysCount} days stored in PostgreSQL on 10.82.126.44.`);
+  console.log(`   Total Cycles Saved: ${totalHistoricalSaved} | Historical Records Clubbed: ${totalHistoricalClubbed}`);
+  console.log(`================================================================\n`);
+
+  return {
+    success: true,
+    daysProcessed: daysCount,
+    totalSaved: totalHistoricalSaved,
+    totalClubbed: totalHistoricalClubbed,
+    details: results
   };
 }
 
@@ -680,6 +731,7 @@ function getCsvIngestionStatus() {
 
 module.exports = {
   runCsvPullJob,
+  runHistoricalBackfillJob,
   resolveWrench,
   getCsvIngestionStatus,
   URYU_MOUNT_PATH,
