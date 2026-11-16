@@ -36,7 +36,7 @@ async function initializeTables() {
     setTablesReady(false);
     console.warn(`ℹ️ [PostgreSQL Note] PostgreSQL connected, but table creation was bypassed: ${err.message}`);
     console.log('💾 [PostgreSQL Store] Resilient local store active: Serving all 73 tools and graphs smoothly.');
-    console.log('💡 Note: To persist cycles in PostgreSQL, run `initPostgres.sql` on database `enginetracking` using an account with DDL permissions.');
+    console.log('💡 Note: To persist cycles in PostgreSQL, run `initNewDatabase.sql` to create `tnga_wrench_db` using an account with DDL permissions.');
   } finally {
     if (client) client.release();
   }
