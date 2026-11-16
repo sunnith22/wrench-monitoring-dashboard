@@ -26,9 +26,7 @@ const DEFAULT_EMAIL_CONFIG = {
 
 let inMemoryConfig = null;
 
-/**
- * Initializes and loads runtime configuration from JSON file or defaults
- */
+
 function loadConfig() {
   if (inMemoryConfig) return inMemoryConfig;
 

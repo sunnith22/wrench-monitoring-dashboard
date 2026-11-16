@@ -2,13 +2,21 @@
  * ==============================================================================
  * TOYOTA INDUSTRIES ENGINE INDIA (TIEI)
  * TNGA Impact Wrench Monitoring & Telemetry Infrastructure
- * Module: Local PC Mounted CSV Ingestion Service
+ * Module: Multi-Vendor Local PC CSV Ingestion Service (URYU & YOKOTA)
  * ==============================================================================
  * Purpose:
- *   Periodically pulls tightening cycle data from CSV files stored in daily
- *   date folders (e.g. '14-11-2026') on a mounted local PC drive (e.g. Z:\ or \\PC-IP\Share).
- *   Inserts the parsed cycles into PostgreSQL on 10.82.126.44 (clubbing new with old)
- *   without re-scanning historical folders to guarantee ZERO system hanging or freezing.
+ *   Periodically pulls tightening cycle data from the mounted shop-floor PC drive
+ *   (e.g. Z:\ or \\172.16.105.234\DATA), automatically resolving the UEC-4800 (URYU)
+ *   and YOKOTA directory layouts:
+ *     - URYU:   <Mount>/<FolderNum>/UEC-4800/<YYYYMMDD>/*.csv
+ *     - YOKOTA: <Mount>/<FolderNum>/120_0_100_<Num>/<YYYYMMDD>/*.csv
+ *   
+ *   Supports both:
+ *     1. Summary CSV files (F-Data_*.csv) with "Number of pulses" column
+ *     2. Individual cycle CSVs (<Timestamp>.csv) with Row 3 "Final: ... Puls <N> Trq <T>"
+ *   
+ *   Inserts parsed cycles into PostgreSQL on 10.82.126.44 (clubbing new with old)
+ *   targeting strictly today's date folder to guarantee ZERO system hanging.
  * ==============================================================================
  */
 
@@ -18,20 +26,21 @@ const path = require('path');
 const readline = require('readline');
 const { ALL_WRENCH_ASSETS } = require('../data/wrenchCatalog');
 const { query, localFallbackCycles, getPostgresStatus } = require('../config/postgresDB');
-const { getToolThreshold, recordAudit } = require('./configService');
+const { getToolThreshold } = require('./configService');
 const { dispatchPulseEmailAlert } = require('./emailService');
 
-// Configured mounted drive root (e.g., Z:\ or \\10.82.126.xx\share)
+// Configured mounted drive root (e.g., Z:\ or \\172.16.105.234\DATA)
 const DATA_MOUNT_PATH = process.env.DATA_MOUNT_PATH || 'Z:\\';
 
-// In-Memory tracker for processed file line offsets to prevent redundant re-reading
-// Key: filePath -> lastProcessedLineIndex
+// Track processed files and line offsets to prevent redundant re-reading
 const fileLineTracker = new Map();
+const processedIndividualFiles = new Set();
 
-// Sync metrics
+// In-Memory live sync metrics
 let lastSyncStats = {
   lastRunTimestamp: null,
-  folderScanned: null,
+  mountPath: DATA_MOUNT_PATH,
+  toolFoldersFound: 0,
   filesProcessed: 0,
   rowsIngested: 0,
   duplicatesSkipped: 0,
@@ -41,118 +50,147 @@ let lastSyncStats = {
 };
 
 /**
- * Returns formatted date string in DD-MM-YYYY (e.g. "14-11-2026")
+ * Returns formatted date strings for folder matching
+ * e.g. "20261116" (Standard UEC-4800/Yokota date folder) and "16-11-2026"
  */
-function getTodayDateString(date = new Date()) {
-  const day = String(date.getDate()).padStart(2, '0');
-  const month = String(date.getMonth() + 1).padStart(2, '0');
-  const year = date.getFullYear();
-  return `${day}-${month}-${year}`;
+function getDateKeys(date = new Date()) {
+  const yyyy = String(date.getFullYear());
+  const mm = String(date.getMonth() + 1).padStart(2, '0');
+  const dd = String(date.getDate()).padStart(2, '0');
+
+  return {
+    compact: `${yyyy}${mm}${dd}`,          // "20261116" (UEC-4800 / Yokota standard)
+    dashes: `${dd}-${mm}-${yyyy}`,          // "16-11-2026"
+    iso: `${yyyy}-${mm}-${dd}`             // "2026-11-16"
+  };
 }
 
 /**
- * Finds today's active date folder on the mounted drive.
- * CRUCIAL FOR PERFORMANCE:
- * Only checks today's date folder (e.g. '14-11-2026').
- * Does NOT iterate through all past days, eliminating network SMB latency and freezing!
+ * Resolves a Wrench Asset from folder number, controller IP, or filename
+ * Handles the plant mapping:
+ *   - Folder "029" (Station 46) -> URYU_ST46_F029 (Controller IP .24)
+ *   - Folder "019" (Station 46) -> URYU_ST46_F019 (Controller IP .25)
+ *   - Folder "0103" (Station 53) -> YOKOTA_ST53_F0103 (Controller IP .103)
  */
-async function locateTodayFolder(baseMountPath = DATA_MOUNT_PATH, customDateStr = null) {
-  const targetDateStr = customDateStr || getTodayDateString();
-  
-  // Potential date folder naming variations
-  const candidateNames = [
-    targetDateStr,                                  // "14-11-2026" (User standard)
-    targetDateStr.replace(/-/g, '_'),              // "14_11_2026"
-    targetDateStr.replace(/-/g, '.'),              // "14.11.2026"
-    new Date().toISOString().split('T')[0]         // "2026-11-14" (ISO)
-  ];
+function resolveWrench(folderToken, ipToken = null, fileName = '') {
+  const normFolder = String(folderToken || '').replace(/^0+/, '') || '0';
+  const pad3 = normFolder.padStart(3, '0');
+  const pad4 = normFolder.padStart(4, '0');
 
-  try {
-    const exists = await fsp.access(baseMountPath).then(() => true).catch(() => false);
-    if (!exists) {
-      return {
-        exists: false,
-        error: `Mount drive '${baseMountPath}' is not accessible or not mounted yet.`
-      };
-    }
+  // 1. Direct folder match in Master Catalog
+  const byFolder = ALL_WRENCH_ASSETS.find(w => {
+    const wNorm = String(w.folder || '').replace(/^0+/, '');
+    return wNorm === normFolder || w.folder === pad3 || w.folder === pad4;
+  });
+  if (byFolder) return byFolder;
 
-    for (const name of candidateNames) {
-      const candidatePath = path.join(baseMountPath, name);
-      const isDir = await fsp.stat(candidatePath).then(s => s.isDirectory()).catch(() => false);
-      if (isDir) {
-        return { exists: true, folderPath: candidatePath, folderName: name };
-      }
-    }
+  // 2. Controller Number / IP match (last octet e.g. "24" or "103")
+  if (ipToken) {
+    const normIpNum = String(ipToken).replace(/^.*[._]/, '').trim();
+    const byContr = ALL_WRENCH_ASSETS.find(w => String(w.contr_no) === normIpNum);
+    if (byContr) return byContr;
 
-    return {
-      exists: false,
-      error: `Today's date folder ('${targetDateStr}') not found in '${baseMountPath}'.`
-    };
-  } catch (err) {
-    return { exists: false, error: err.message };
-  }
-}
-
-/**
- * Resolves which Wrench Asset a CSV file belongs to based on its filename or internal folder code
- */
-function matchWrenchAsset(fileName, folderNumber = null) {
-  const cleanName = path.basename(fileName, path.extname(fileName)).toUpperCase();
-
-  // 1. Direct wrench_id match
-  const direct = ALL_WRENCH_ASSETS.find(w => cleanName.includes(w.wrench_id.toUpperCase()));
-  if (direct) return direct;
-
-  // 2. Folder match (e.g. folder "016", "0102", "0250")
-  if (folderNumber) {
-    const padFolder = String(folderNumber).padStart(3, '0');
-    const byFolder = ALL_WRENCH_ASSETS.find(w => String(w.folder).padStart(3, '0') === padFolder);
-    if (byFolder) return byFolder;
+    const byFolderFromIp = ALL_WRENCH_ASSETS.find(w => String(w.folder || '').replace(/^0+/, '') === normIpNum);
+    if (byFolderFromIp) return byFolderFromIp;
   }
 
-  // 3. Station and Folder from filename regex (e.g., F-Data_ST28_016.csv or ST28_016.csv)
-  const stMatch = cleanName.match(/ST(?:ATION)?[-_]?([0-9A-Z]+)[-_]([0-9]+)/i);
-  if (stMatch) {
-    const station = stMatch[1];
-    const folder = stMatch[2];
-    const match = ALL_WRENCH_ASSETS.find(w => 
-      String(w.station).toUpperCase() === station.toUpperCase() && 
-      (String(w.folder) === folder || String(w.folder).padStart(3, '0') === folder.padStart(3, '0'))
-    );
-    if (match) return match;
-  }
-
-  // 4. Fallback search by station or folder token
+  // 3. Filename token match (e.g. "F-Data_ST28_016.csv" or "0103_120_0_100_103_*.csv")
+  const upperFile = fileName.toUpperCase();
   for (const tool of ALL_WRENCH_ASSETS) {
-    if (tool.folder && cleanName.includes(String(tool.folder))) {
-      return tool;
-    }
+    if (upperFile.includes(tool.wrench_id.toUpperCase())) return tool;
+    if (tool.folder && upperFile.includes(String(tool.folder))) return tool;
   }
 
   return null;
 }
 
 /**
- * Streams and parses a shop-floor CSV file line-by-line using native readline (fast, 0 overhead).
- * Shop-Floor UEC-4800 / URYU / YOKOTA Format:
- *   Line 1: Empty or Title
- *   Line 2: Machine model (e.g. "UEC-4800")
- *   Line 3: Save date/time
- *   Line 4: Column Headers ("Tightening date/time","WorkNO.","Number of pulses","Torque","Angle","Judgement",...)
- *   Line 5+: Tightening Cycle Rows
+ * Parses individual cycle curve CSV file (e.g., 20261114053505904.csv)
+ * Structure seen in plant:
+ *   Line 1: @Ang_V3@ data= 139 Interval= 10 ProgNo= 1a2
+ *   Line 2: FreeRun: Time 0.77 Deg 3639 Trq 5.2
+ *   Line 3: Final: Time 0.6 Deg 9 Puls 17 Trq 7
+ *   Line 4+: Curve points (Trq, Deg)
  */
-async function parseCsvFileIncrementally(filePath) {
-  const stats = await fsp.stat(filePath);
-  const lastLineRead = fileLineTracker.get(filePath) || 0;
+async function parseIndividualCycleFile(filePath, fileName) {
+  try {
+    const fileStream = fs.createReadStream(filePath, { encoding: 'utf8' });
+    const rl = readline.createInterface({ input: fileStream, crlfDelay: Infinity });
 
+    let lineIndex = 0;
+    let finalRowData = null;
+
+    for await (const line of rl) {
+      lineIndex++;
+      const trimmed = line.trim();
+
+      // Look for the "Final:" summary row on Line 3 (or anywhere in first 5 lines)
+      if (lineIndex <= 5 && (trimmed.startsWith('Final:') || trimmed.includes('Puls') || trimmed.includes('Pulse'))) {
+        const tokens = trimmed.replace(/\t/g, ',').split(',').map(t => t.trim()).filter(Boolean);
+        const parsed = {};
+
+        for (let i = 0; i < tokens.length; i++) {
+          const tok = tokens[i].toLowerCase();
+          if (['puls', 'pulse', 'pulses', 'no.of pulses'].includes(tok) && i + 1 < tokens.length) {
+            parsed.pulse = parseInt(tokens[i + 1], 10) || 0;
+          }
+          if (['trq', 'torque'].includes(tok) && i + 1 < tokens.length) {
+            parsed.torque = parseFloat(tokens[i + 1]) || 0;
+          }
+          if (['deg', 'angle'].includes(tok) && i + 1 < tokens.length) {
+            parsed.angle = parseFloat(tokens[i + 1]) || 0;
+          }
+          if (['time'].includes(tok) && i + 1 < tokens.length) {
+            parsed.time = parseFloat(tokens[i + 1]) || 0;
+          }
+        }
+
+        if (parsed.pulse !== undefined || parsed.torque !== undefined) {
+          finalRowData = parsed;
+          break;
+        }
+      }
+
+      if (lineIndex > 5) break;
+    }
+
+    rl.close();
+
+    if (!finalRowData) return null;
+
+    // Parse timestamp from filename: YYYYMMDDhhmmssfff.csv -> "YYYY-MM-DD hh:mm:ss"
+    let tighteningTime = new Date().toISOString();
+    const baseName = path.basename(fileName, path.extname(fileName));
+    const timeMatch = baseName.match(/(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})/);
+    if (timeMatch) {
+      tighteningTime = `${timeMatch[1]}-${timeMatch[2]}-${timeMatch[3]} ${timeMatch[4]}:${timeMatch[5]}:${timeMatch[6]}`;
+    }
+
+    return {
+      tighteningTime,
+      receptionTime: tighteningTime,
+      workNo: '1',
+      pulseCount: finalRowData.pulse || 0,
+      torque: finalRowData.torque || 0,
+      angle: finalRowData.angle || 0,
+      judgement: 'OK',
+      cycleCounter: parseInt(baseName.slice(-6) || '1', 10) || 1
+    };
+  } catch (err) {
+    return null;
+  }
+}
+
+/**
+ * Parses summary CSV file (e.g., F-Data*.csv or multi-row tabular CSV)
+ * Reads line 4 headers: "Tightening date/time", "BARCODE", "WorkNO.", "Count", "Torque", "Angle", "Number of pulses"
+ */
+async function parseSummaryCsvFile(filePath) {
+  const lastLineRead = fileLineTracker.get(filePath) || 0;
   const fileStream = fs.createReadStream(filePath, { encoding: 'utf8' });
-  const rl = readline.createInterface({
-    input: fileStream,
-    crlfDelay: Infinity
-  });
+  const rl = readline.createInterface({ input: fileStream, crlfDelay: Infinity });
 
   let currentLine = 0;
-  let headers = [];
   let headerIndexMap = {};
   const newRows = [];
 
@@ -161,36 +199,41 @@ async function parseCsvFileIncrementally(filePath) {
     const trimmed = line.trim();
     if (!trimmed) continue;
 
-    // Header is on Line 4
     if (currentLine === 4) {
-      headers = trimmed.split(',').map(h => h.replace(/^"|"$/g, '').trim());
+      const headers = trimmed.split(',').map(h => h.replace(/^"|"$/g, '').trim());
       headers.forEach((h, idx) => {
-        headerIndexMap[h] = idx;
+        headerIndexMap[h.toLowerCase()] = idx;
       });
       continue;
     }
 
-    // Process only lines after the previously processed line count
     if (currentLine > 4 && currentLine > lastLineRead) {
       const cols = trimmed.split(',').map(c => c.replace(/^"|"$/g, '').trim());
-      
-      const tighteningTime = cols[headerIndexMap['Tightening date/time']] || cols[0] || '';
-      const receptionTime = cols[headerIndexMap['Reception date/time']] || tighteningTime;
-      const workNo = cols[headerIndexMap['WorkNO.']] || cols[1] || String(currentLine - 4);
-      const pulseCount = parseInt(cols[headerIndexMap['Number of pulses']] || cols[3] || '0', 10);
-      const torque = parseFloat(cols[headerIndexMap['Torque']] || cols[4] || '0');
-      const angle = parseFloat(cols[headerIndexMap['Angle']] || cols[5] || '0');
-      const judgement = (cols[headerIndexMap['Judgement']] || cols[6] || 'OK').toUpperCase();
-      const count = parseInt(cols[headerIndexMap['Count']] || workNo || String(currentLine - 4), 10);
+
+      const getVal = (...keys) => {
+        for (const k of keys) {
+          const idx = headerIndexMap[k.toLowerCase()];
+          if (idx !== undefined && cols[idx] !== undefined) return cols[idx];
+        }
+        return '';
+      };
+
+      const tighteningTime = getVal('tightening date/time', 'date/time', 'timestamp') || cols[0] || '';
+      const workNo = getVal('workno.', 'work no', 'barcode') || String(currentLine - 4);
+      const pulseRaw = getVal('number of pulses', 'no.of pulses', 'pulses', 'puls') || cols[3] || '0';
+      const torqueRaw = getVal('torque', 'trq') || cols[4] || '0';
+      const angleRaw = getVal('angle', 'deg') || cols[5] || '0';
+      const judgement = (getVal('judgement', 'judgment', 'status') || 'OK').toUpperCase();
+      const count = parseInt(getVal('count') || workNo || String(currentLine - 4), 10) || (currentLine - 4);
 
       if (tighteningTime) {
         newRows.push({
           tighteningTime,
-          receptionTime,
+          receptionTime: tighteningTime,
           workNo,
-          pulseCount,
-          torque,
-          angle,
+          pulseCount: parseInt(pulseRaw, 10) || 0,
+          torque: parseFloat(torqueRaw) || 0,
+          angle: parseFloat(angleRaw) || 0,
           judgement,
           cycleCounter: count
         });
@@ -198,28 +241,26 @@ async function parseCsvFileIncrementally(filePath) {
     }
   }
 
-  // Update line tracker for this file
   fileLineTracker.set(filePath, currentLine);
-
-  return { newRows, totalLines: currentLine };
+  return newRows;
 }
 
 /**
- * Inserts parsed tightening cycles into PostgreSQL on 10.82.126.44.
+ * Inserts parsed cycles into PostgreSQL on 10.82.126.44
  * Uses ON CONFLICT (wrench_id, tightening_time, cycle_counter) DO NOTHING
- * to seamlessly club new data with old data without duplicate records.
+ * Seamlessly clubs new rows with historical data with zero duplication.
  */
 async function insertCyclesToPostgres(wrench, cycles) {
   let inserted = 0;
   let skipped = 0;
 
   for (const c of cycles) {
-    const pulseStatus = c.pulseCount > (wrench.default_pulse_threshold || 25)
+    const activeLimit = getToolThreshold(wrench.wrench_id) || wrench.default_pulse_threshold || 25;
+    const pulseStatus = c.pulseCount > activeLimit
       ? 'CRITICAL'
-      : (c.pulseCount >= (wrench.default_pulse_threshold || 25) - 3 ? 'WARNING' : 'NORMAL');
+      : (c.pulseCount >= activeLimit - 3 ? 'WARNING' : 'NORMAL');
     const torqueStatus = c.judgement === 'NG' ? 'NG' : 'OK';
-    const angleStatus = 'OK';
-    const engineNo = `ENG-${c.workNo.padStart(4, '0')}`;
+    const engineNo = `ENG-${String(c.workNo || '1').padStart(4, '0')}`;
 
     try {
       // 1. Insert into PostgreSQL
@@ -245,7 +286,7 @@ async function insertCyclesToPostgres(wrench, cycles) {
           c.torque,
           torqueStatus,
           c.angle,
-          angleStatus,
+          'OK',
           c.pulseCount,
           pulseStatus,
           c.cycleCounter
@@ -258,7 +299,7 @@ async function insertCyclesToPostgres(wrench, cycles) {
         skipped++;
       }
 
-      // 2. Also keep resilient localFallbackCycles up to date
+      // 2. Also keep resilient local fallback cache updated
       const alreadyInFallback = localFallbackCycles.some(
         f => f.wrench_id === wrench.wrench_id && f.tightening_time === c.tighteningTime && f.cycle_counter === c.cycleCounter
       );
@@ -276,7 +317,7 @@ async function insertCyclesToPostgres(wrench, cycles) {
           torque_val: c.torque,
           torque_status: torqueStatus,
           angle_val: c.angle,
-          angle_status: angleStatus,
+          angle_status: 'OK',
           pulse_count: c.pulseCount,
           pulse_status: pulseStatus,
           cycle_counter: c.cycleCounter,
@@ -284,9 +325,8 @@ async function insertCyclesToPostgres(wrench, cycles) {
         });
       }
 
-      // 3. Trigger Email Alert if threshold is exceeded
-      const activeThreshold = getToolThreshold(wrench.wrench_id) || wrench.default_pulse_threshold;
-      if (c.pulseCount > activeThreshold) {
+      // 3. Threshold alert dispatch
+      if (c.pulseCount > activeLimit) {
         try {
           await dispatchPulseEmailAlert({
             wrench_id: wrench.wrench_id,
@@ -296,7 +336,7 @@ async function insertCyclesToPostgres(wrench, cycles) {
             assembly_name: wrench.assembly_name,
             sub_assembly_name: wrench.sub_assembly_name,
             pulse_count: c.pulseCount,
-            threshold: activeThreshold,
+            threshold: activeLimit,
             torque: c.torque,
             angle: c.angle,
             engine_number: engineNo,
@@ -316,96 +356,181 @@ async function insertCyclesToPostgres(wrench, cycles) {
 }
 
 /**
- * Main Pull Routine:
- * Periodically pulls data from the mounted local PC drive, targeting ONLY today's date folder.
- * Seamlessly clubs new rows into PostgreSQL on 10.82.126.44 without duplicates.
+ * Discovers root data directories under mount path
+ * e.g. D:\DATA-28mar, Z:\DATA-28mar, Z:\AppData, or Z:\ directly
  */
-async function runCsvPullJob(customMountPath = null, customDate = null) {
+async function discoverRootDirectories(baseMountPath) {
+  const roots = [baseMountPath];
+
+  try {
+    const entries = await fsp.readdir(baseMountPath, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.isDirectory() && !entry.name.startsWith('.') && !entry.name.startsWith('$')) {
+        const lower = entry.name.toLowerCase();
+        if (lower.startsWith('data') || lower.startsWith('appdata') || lower.includes('wrench')) {
+          roots.push(path.join(baseMountPath, entry.name));
+        }
+      }
+    }
+  } catch (err) {
+    // Handled
+  }
+
+  return [...new Set(roots)];
+}
+
+/**
+ * Main Pull Routine:
+ * Scans today's date directory across all tool folders on the mounted local PC drive.
+ * Reads both URYU and YOKOTA formats and clubs new data into PostgreSQL on 10.82.126.44.
+ */
+async function runCsvPullJob(customMountPath = null) {
   const mountRoot = customMountPath || DATA_MOUNT_PATH;
   const startTime = new Date();
-  
+  const dateKeys = getDateKeys(startTime);
+
   console.log(`\n================================================================`);
-  console.log(`📥 [CSV Ingestion Job] Checking mounted PC drive: '${mountRoot}'`);
-  console.log(`   Target Server: PostgreSQL on 10.82.126.44 (DB: enginetracking)`);
+  console.log(`📥 [CSV Ingestion Job] Pulling shop-floor cycles for date: ${dateKeys.compact} (${dateKeys.dashes})`);
+  console.log(`   Mount Drive: '${mountRoot}' | PostgreSQL: 10.82.126.44:5432/enginetracking`);
   console.log(`================================================================`);
 
   lastSyncStats.status = 'RUNNING';
   lastSyncStats.lastRunTimestamp = startTime.toISOString();
   lastSyncStats.error = null;
 
-  const folderLoc = await locateTodayFolder(mountRoot, customDate);
-  if (!folderLoc.exists) {
-    lastSyncStats.status = 'WAITING_MOUNT';
-    lastSyncStats.error = folderLoc.error;
-    console.log(`ℹ️ [CSV Ingestion Note]: ${folderLoc.error}`);
-    console.log(`   (Waiting for local PC drive to be mounted or today's folder to appear)`);
-    return { success: false, reason: folderLoc.error };
-  }
-
-  const folderPath = folderLoc.folderPath;
-  lastSyncStats.folderScanned = folderPath;
-  console.log(`📂 [CSV Ingestion] Active daily folder found: ${folderPath}`);
-
   try {
-    const dirEntries = await fsp.readdir(folderPath, { withFileTypes: true });
-    const csvFiles = dirEntries.filter(e => e.isFile() && e.name.toLowerCase().endsWith('.csv'));
+    const mountExists = await fsp.access(mountRoot).then(() => true).catch(() => false);
+    if (!mountExists) {
+      const msg = `Mount drive '${mountRoot}' is currently not accessible. (Waiting for local PC network share)`;
+      lastSyncStats.status = 'WAITING_MOUNT';
+      lastSyncStats.error = msg;
+      console.log(`ℹ️ [CSV Ingestion]: ${msg}`);
+      return { success: false, reason: msg };
+    }
 
-    console.log(`📄 [CSV Ingestion] Found ${csvFiles.length} CSV files in today's folder.`);
-
-    let totalRowsIngested = 0;
+    const searchRoots = await discoverRootDirectories(mountRoot);
+    let totalRowsAdded = 0;
     let totalDuplicatesSkipped = 0;
-    let filesProcessed = 0;
+    let totalFilesChecked = 0;
+    let toolFoldersCount = 0;
 
-    for (const file of csvFiles) {
-      const fullFilePath = path.join(folderPath, file.name);
-      
-      // Resolve wrench asset
-      const wrench = matchWrenchAsset(file.name);
-      if (!wrench) {
-        // Skip unmapped files
+    for (const rootDir of searchRoots) {
+      let entries = [];
+      try {
+        entries = await fsp.readdir(rootDir, { withFileTypes: true });
+      } catch (err) {
         continue;
       }
 
-      filesProcessed++;
-      const { newRows } = await parseCsvFileIncrementally(fullFilePath);
+      // Find tool folders (e.g. "029", "019", "016", "0103", "0053", "0250", etc.)
+      const folderCandidates = entries.filter(e => e.isDirectory() && /^\d+$/.test(e.name));
 
-      if (newRows.length > 0) {
-        const { inserted, skipped } = await insertCyclesToPostgres(wrench, newRows);
-        totalRowsIngested += inserted;
-        totalDuplicatesSkipped += skipped;
-        console.log(`   -> [${wrench.wrench_id}] ${file.name}: +${inserted} new cycles ingested (${skipped} existing/clubbed).`);
+      for (const fEntry of folderCandidates) {
+        const folderNumber = fEntry.name;
+        const toolDir = path.join(rootDir, folderNumber);
+
+        // Subfolder variations for URYU and YOKOTA:
+        // 1. URYU: <folder>/UEC-4800/<YYYYMMDD>/
+        // 2. YOKOTA: <folder>/120_0_100_<num>/<YYYYMMDD>/ or <folder>/<YYYYMMDD>/
+        const dateSubfolders = [
+          path.join(toolDir, 'UEC-4800', dateKeys.compact),
+          path.join(toolDir, 'UEC-4800', dateKeys.dashes),
+          path.join(toolDir, dateKeys.compact),
+          path.join(toolDir, dateKeys.dashes)
+        ];
+
+        // Also check IP subdirectories like 120_0_100_*
+        try {
+          const subEntries = await fsp.readdir(toolDir, { withFileTypes: true });
+          for (const sub of subEntries) {
+            if (sub.isDirectory() && (sub.name.startsWith('120_') || sub.name.toUpperCase() === 'YOKOTA')) {
+              dateSubfolders.push(path.join(toolDir, sub.name, dateKeys.compact));
+              dateSubfolders.push(path.join(toolDir, sub.name, dateKeys.dashes));
+            }
+          }
+        } catch (subErr) {}
+
+        // Scan the active date directory
+        for (const activeDateDir of dateSubfolders) {
+          const dirExists = await fsp.access(activeDateDir).then(() => true).catch(() => false);
+          if (!dirExists) continue;
+
+          toolFoldersCount++;
+          let files = [];
+          try {
+            files = await fsp.readdir(activeDateDir);
+          } catch (readDirErr) {
+            continue;
+          }
+
+          const csvFiles = files.filter(f => f.toLowerCase().endsWith('.csv'));
+
+          for (const file of csvFiles) {
+            const fullPath = path.join(activeDateDir, file);
+            totalFilesChecked++;
+
+            // Resolve tool asset
+            const wrench = resolveWrench(folderNumber, null, file);
+            if (!wrench) continue;
+
+            // Check if summary CSV (F-Data*.csv) or individual cycle file (<timestamp>.csv)
+            if (file.startsWith('F-Data') || file.toLowerCase().includes('summary') || file.toLowerCase().includes('tightening')) {
+              const summaryRows = await parseSummaryCsvFile(fullPath);
+              if (summaryRows.length > 0) {
+                const { inserted, skipped } = await insertCyclesToPostgres(wrench, summaryRows);
+                totalRowsAdded += inserted;
+                totalDuplicatesSkipped += skipped;
+                if (inserted > 0) {
+                  console.log(`   -> [${wrench.wrench_id}] ${file}: +${inserted} new cycles (${skipped} clubbed).`);
+                }
+              }
+            } else if (/^\d{8,}/.test(file)) {
+              // Individual cycle CSV (e.g. 20261114053505904.csv)
+              if (!processedIndividualFiles.has(fullPath)) {
+                const cycle = await parseIndividualCycleFile(fullPath, file);
+                processedIndividualFiles.add(fullPath);
+                if (cycle) {
+                  const { inserted, skipped } = await insertCyclesToPostgres(wrench, [cycle]);
+                  totalRowsAdded += inserted;
+                  totalDuplicatesSkipped += skipped;
+                  if (inserted > 0) {
+                    console.log(`   -> [${wrench.wrench_id}] ${file}: Ingested pulse=${cycle.pulseCount}, trq=${cycle.torque} N·m.`);
+                  }
+                }
+              }
+            }
+          }
+        }
       }
     }
 
-    lastSyncStats.filesProcessed = filesProcessed;
-    lastSyncStats.rowsIngested = totalRowsIngested;
+    const durationMs = Date.now() - startTime.getTime();
+    lastSyncStats.toolFoldersFound = toolFoldersCount;
+    lastSyncStats.filesProcessed = totalFilesChecked;
+    lastSyncStats.rowsIngested = totalRowsAdded;
     lastSyncStats.duplicatesSkipped = totalDuplicatesSkipped;
     lastSyncStats.status = 'COMPLETED';
 
-    const durationMs = Date.now() - startTime.getTime();
     console.log(`✅ [CSV Ingestion Completed in ${durationMs}ms]`);
-    console.log(`   Files Checked: ${filesProcessed} | New Rows Added: ${totalRowsIngested} | Clubbed: ${totalDuplicatesSkipped}`);
+    console.log(`   Folders: ${toolFoldersCount} | Files: ${totalFilesChecked} | New Rows: ${totalRowsAdded} | Clubbed: ${totalDuplicatesSkipped}`);
     console.log(`================================================================\n`);
 
     return {
       success: true,
-      folder: folderPath,
-      filesProcessed,
-      rowsIngested: totalRowsIngested,
+      toolFoldersCount,
+      filesProcessed: totalFilesChecked,
+      rowsIngested: totalRowsAdded,
       duplicatesSkipped: totalDuplicatesSkipped,
       durationMs
     };
   } catch (err) {
     lastSyncStats.status = 'ERROR';
     lastSyncStats.error = err.message;
-    console.error(`❌ [CSV Ingestion Error]:`, err.message);
+    console.error(`❌ [CSV Ingestion Job Error]:`, err.message);
     return { success: false, error: err.message };
   }
 }
 
-/**
- * Returns the current live sync metrics and mount status
- */
 function getCsvIngestionStatus() {
   const pg = getPostgresStatus();
   return {
@@ -420,7 +545,7 @@ function getCsvIngestionStatus() {
 
 module.exports = {
   runCsvPullJob,
-  locateTodayFolder,
+  resolveWrench,
   getCsvIngestionStatus,
   DATA_MOUNT_PATH
 };
