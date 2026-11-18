@@ -6,7 +6,7 @@ const { sendTestEmail, getEmailHistory } = require('../services/emailService');
 
 // Hardcoded Default Admin Credentials (can be configured via ENV)
 const ADMIN_USER = process.env.ADMIN_USER || 'admin';
-const ADMIN_PASS = process.env.ADMIN_PASS || 'admin123';
+const ADMIN_PASS = process.env.ADMIN_PASS || 'Tiei@2026';
 
 /**
  * Middleware: Simple Bearer / Session Auth Guard for Admin Actions
