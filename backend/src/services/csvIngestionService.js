@@ -627,10 +627,199 @@ function getCsvIngestionStatus() {
   };
 }
 
+// In-memory cache for fast API reads without repeating SMB disk reads
+const folderApiCache = new Map();
+
+/**
+ * Directly resolves a folder path without scanning all 73 tools
+ */
+async function findDirectFolderDirectory(mountRoots, folderNumber, dateKeys) {
+  const norm = String(folderNumber || '').replace(/^0+/, '');
+  const variations = [
+    folderNumber,
+    norm.padStart(3, '0'),
+    norm.padStart(4, '0'),
+    norm
+  ];
+
+  for (const root of mountRoots) {
+    if (!root) continue;
+    const subRoots = [
+      path.join(root, 'DATA-28mar'),
+      path.join(root, 'DATA'),
+      root
+    ];
+
+    for (const subRoot of subRoots) {
+      for (const f of variations) {
+        const toolDir = path.join(subRoot, f);
+        const candidatePaths = [
+          path.join(toolDir, 'UEC-4800', dateKeys.compact),
+          path.join(toolDir, dateKeys.compact),
+          path.join(toolDir, 'UEC-4800', dateKeys.dashes)
+        ];
+
+        for (const cPath of candidatePaths) {
+          try {
+            await fsp.access(cPath, fs.constants.R_OK);
+            return { foundPath: cPath, folderNumber: f, rootDir: subRoot };
+          } catch (e) {}
+        }
+
+        try {
+          const subEntries = await fsp.readdir(toolDir, { withFileTypes: true });
+          for (const sub of subEntries) {
+            if (sub.isDirectory() && (sub.name.startsWith('120_') || sub.name.toUpperCase() === 'YOKOTA')) {
+              const yPath = path.join(toolDir, sub.name, dateKeys.compact);
+              try {
+                await fsp.access(yPath, fs.constants.R_OK);
+                return { foundPath: yPath, folderNumber: f, rootDir: subRoot };
+              } catch (e) {}
+            }
+          }
+        } catch (e) {}
+      }
+    }
+  }
+
+  return null;
+}
+
+/**
+ * API function: Reads and returns JSON telemetry for a single folder directly from the mount point.
+ * Ultra-fast direct jump with in-memory caching.
+ */
+async function getFolderTelemetryDirect(folderNumber, targetDateInput = null, bypassCache = false) {
+  const targetDate = targetDateInput instanceof Date
+    ? targetDateInput
+    : (targetDateInput ? new Date(targetDateInput) : new Date());
+  const dateKeys = getDateKeys(targetDate);
+  const cacheKey = `${folderNumber}_${dateKeys.compact}`;
+
+  if (!bypassCache && folderApiCache.has(cacheKey)) {
+    return {
+      cached: true,
+      folder: folderNumber,
+      date: dateKeys.compact,
+      ...folderApiCache.get(cacheKey)
+    };
+  }
+
+  const activeUryu = await resolveAccessiblePath([URYU_MOUNT_PATH, URYU_UNC_SHARE, FALLBACK_MOUNT]);
+  const activeYokota = await resolveAccessiblePath([YOKOTA_MOUNT_PATH, YOKOTA_UNC_SHARE]);
+  const mountRoots = [activeUryu, activeYokota].filter(Boolean);
+
+  if (mountRoots.length === 0) {
+    return {
+      success: false,
+      error: 'No active mount points found. Check /mnt/torque_wrench and /mnt/yokota.',
+      records: []
+    };
+  }
+
+  const directMatch = await findDirectFolderDirectory(mountRoots, folderNumber, dateKeys);
+  if (!directMatch) {
+    return {
+      success: false,
+      message: `Folder '${folderNumber}' not found for date ${dateKeys.compact} in mount points.`,
+      records: []
+    };
+  }
+
+  const wrench = resolveWrench(directMatch.folderNumber);
+  let files = [];
+  try {
+    files = await fsp.readdir(directMatch.foundPath);
+  } catch (err) {
+    return { success: false, error: err.message, records: [] };
+  }
+
+  const csvFiles = files.filter(f => f.toLowerCase().endsWith('.csv'));
+  const records = [];
+
+  for (const file of csvFiles) {
+    const fullPath = path.join(directMatch.foundPath, file);
+    if (file.startsWith('F-Data') || file.toLowerCase().includes('summary') || file.toLowerCase().includes('tightening')) {
+      const summaryRows = await parseSummaryCsvFileSafely(fullPath);
+      records.push(...summaryRows);
+    } else if (/^\d{8,}/.test(file)) {
+      const cycle = await parseIndividualCycleFileSafely(fullPath, file);
+      if (cycle) records.push(cycle);
+    }
+  }
+
+  const result = {
+    success: true,
+    folder: folderNumber,
+    toolName: wrench?.tool_name || 'Unknown Tool',
+    station: wrench?.station || 'N/A',
+    date: dateKeys.compact,
+    path: directMatch.foundPath,
+    totalFiles: csvFiles.length,
+    recordCount: records.length,
+    records
+  };
+
+  folderApiCache.set(cacheKey, {
+    toolName: result.toolName,
+    station: result.station,
+    path: result.path,
+    totalFiles: result.totalFiles,
+    recordCount: result.recordCount,
+    records: result.records
+  });
+
+  return result;
+}
+
+/**
+ * API function: Fast targeted single-folder sync directly into PostgreSQL.
+ */
+async function syncSingleFolder(folderNumber, targetDateInput = null) {
+  const startTime = Date.now();
+  const directData = await getFolderTelemetryDirect(folderNumber, targetDateInput, true);
+
+  if (!directData.success || directData.records.length === 0) {
+    return {
+      success: false,
+      message: directData.message || directData.error || 'No records found to sync',
+      rowsAdded: 0,
+      dupsSkipped: 0
+    };
+  }
+
+  const wrench = resolveWrench(folderNumber);
+  if (!wrench) {
+    return {
+      success: false,
+      message: `Tool mapping not found in catalog for folder '${folderNumber}'`,
+      rowsAdded: 0
+    };
+  }
+
+  const { inserted, skipped } = await insertCyclesToPostgres(wrench, directData.records);
+  const durationMs = Date.now() - startTime;
+
+  return {
+    success: true,
+    wrench_id: wrench.wrench_id,
+    tool_name: wrench.tool_name,
+    station: wrench.station,
+    folder: folderNumber,
+    recordsChecked: directData.records.length,
+    rowsAdded: inserted,
+    dupsSkipped: skipped,
+    durationMs
+  };
+}
+
 module.exports = {
   runCsvPullJob,
   resolveWrench,
   getCsvIngestionStatus,
+  getFolderTelemetryDirect,
+  syncSingleFolder,
+  findDirectFolderDirectory,
   URYU_MOUNT_PATH,
   YOKOTA_MOUNT_PATH
 };
