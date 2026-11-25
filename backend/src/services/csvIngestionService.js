@@ -48,10 +48,16 @@ const URYU_UNC_SHARE = process.env.URYU_UNC_SHARE || '\\\\172.16.105.234\\D';
 const YOKOTA_UNC_SHARE = process.env.YOKOTA_UNC_SHARE || '\\\\172.16.105.234\\c';
 const FALLBACK_MOUNT = process.env.DATA_MOUNT_PATH || 'Z:\\';
 
-// Memory trackers to prevent redundant re-reading
+// Memory trackers to prevent redundant re-reading & debounce transient spikes
 const fileLineTracker = new Map();
 const processedIndividualFiles = new Set();
+const consecutiveBreachState = new Map(); // wrenchId -> { count, pulses }
 let lastSyncedDateCompact = null;
+
+const CONSECUTIVE_BREACH_REQUIRED = Math.max(
+  1,
+  parseInt(process.env.ALERT_CONSECUTIVE_CYCLES || '5', 10)
+);
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -315,18 +321,63 @@ async function parseSummaryCsvFileSafely(filePath, targetDateIso = getSystemDate
 }
 
 /**
+ * Seeds per-wrench consecutive breach streak from PostgreSQL prior cycles on cold start
+ * so sustained breaches spanning multiple sync runs / restarts are caught accurately.
+ */
+async function seedBreachStateFromPostgres(wrenchId, activeLimit) {
+  if (consecutiveBreachState.has(wrenchId)) return;
+  try {
+    const res = await query(
+      `SELECT pulse_count FROM wrench_tightening_cycles
+       WHERE wrench_id = $1
+       ORDER BY tightening_time DESC, cycle_counter DESC
+       LIMIT $2;`,
+      [wrenchId, CONSECUTIVE_BREACH_REQUIRED - 1]
+    );
+    let streakCount = 0;
+    const streakPulses = [];
+    if (res && res.rows) {
+      // Rows come newest-first; count contiguous trailing breaches
+      for (const row of res.rows) {
+        const p = Number(row.pulse_count || 0);
+        if (p > activeLimit) {
+          streakCount++;
+          streakPulses.unshift(p);
+        } else {
+          break;
+        }
+      }
+    }
+    consecutiveBreachState.set(wrenchId, { count: streakCount, pulses: streakPulses });
+  } catch (err) {
+    consecutiveBreachState.set(wrenchId, { count: 0, pulses: [] });
+  }
+}
+
+/**
  * Inserts parsed cycles into PostgreSQL on 10.82.126.44
  * Uses ON CONFLICT (wrench_id, tightening_time, cycle_counter) DO NOTHING
  * Seamlessly clubs new data with old data without duplicate records.
+ * Sends alert email ONLY when consecutive breaches >= CONSECUTIVE_BREACH_REQUIRED (default 5).
  */
 async function insertCyclesToPostgres(wrench, cycles) {
   let inserted = 0;
   let skipped = 0;
   const pgStatus = getPostgresStatus();
   const isPgLive = pgStatus.connected && pgStatus.tablesReady;
+  const activeLimit = getToolThreshold(wrench.wrench_id) || wrench.default_pulse_threshold || 25;
 
-  for (const c of cycles) {
-    const activeLimit = getToolThreshold(wrench.wrench_id) || wrench.default_pulse_threshold || 25;
+  // Sort chronologically so consecutive breach verification reflects true tightening sequence
+  const orderedCycles = [...cycles].sort((a, b) => {
+    const cmp = String(a.tighteningTime || '').localeCompare(String(b.tighteningTime || ''));
+    return cmp !== 0 ? cmp : (Number(a.cycleCounter || 0) - Number(b.cycleCounter || 0));
+  });
+
+  if (isPgLive && !consecutiveBreachState.has(wrench.wrench_id) && orderedCycles.some(c => c.pulseCount > activeLimit)) {
+    await seedBreachStateFromPostgres(wrench.wrench_id, activeLimit);
+  }
+
+  for (const c of orderedCycles) {
     const pulseStatus = c.pulseCount > activeLimit
       ? 'CRITICAL'
       : (c.pulseCount >= activeLimit - 3 ? 'WARNING' : 'NORMAL');
@@ -397,25 +448,58 @@ async function insertCyclesToPostgres(wrench, cycles) {
       if (rowInserted) inserted++;
       else skipped++;
 
-      // Alert dispatch if threshold breached
-      if (c.pulseCount > activeLimit) {
-        try {
-          await dispatchPulseEmailAlert({
-            wrenchId: wrench.wrench_id,
-            toolName: wrench.tool_name,
-            station: wrench.station,
-            folder: wrench.folder,
-            measuredPulse: c.pulseCount,
-            pulseLimit: activeLimit,
-            torque: c.torque,
-            angle: c.angle,
-            engineNumber: engineNo,
-            timestamp: c.tighteningTime
-          });
-          lastSyncStats.alertsTriggered++;
-        } catch (alertErr) {
-          console.warn(`[Alert Dispatch Warning]:`, alertErr.message);
+      // Evaluate sustained consecutive breaches strictly on newly inserted cycles
+      if (rowInserted) {
+        const streak = consecutiveBreachState.get(wrench.wrench_id) || { count: 0, pulses: [] };
+
+        if (c.pulseCount > activeLimit) {
+          streak.count += 1;
+          streak.pulses.push(c.pulseCount);
+          if (streak.pulses.length > CONSECUTIVE_BREACH_REQUIRED) {
+            streak.pulses.shift();
+          }
+
+          if (streak.count >= CONSECUTIVE_BREACH_REQUIRED) {
+            try {
+              const mailRes = await dispatchPulseEmailAlert({
+                wrenchId: wrench.wrench_id,
+                toolName: wrench.tool_name,
+                station: wrench.station,
+                folder: wrench.folder,
+                measuredPulse: c.pulseCount,
+                pulseLimit: activeLimit,
+                torque: c.torque,
+                angle: c.angle,
+                engineNumber: engineNo,
+                timestamp: c.tighteningTime,
+                consecutiveBreaches: streak.count,
+                recentPulses: [...streak.pulses]
+              });
+              if (mailRes?.status === 'SENT') {
+                lastSyncStats.alertsTriggered++;
+              }
+            } catch (alertErr) {
+              console.warn(`[Alert Dispatch Warning]:`, alertErr.message);
+            }
+            // Reset streak after sustained alert evaluation so next alert requires fresh sustained breaches
+            streak.count = 0;
+            streak.pulses = [];
+          } else {
+            console.log(
+              `⏳ [Consecutive Check] ${wrench.wrench_id}: pulse=${c.pulseCount} > limit=${activeLimit} (${streak.count}/${CONSECUTIVE_BREACH_REQUIRED} consecutive — watching next cycles).`
+            );
+          }
+        } else {
+          if (streak.count > 0) {
+            console.log(
+              `✅ [Consecutive Check Cleared] ${wrench.wrench_id}: pulse=${c.pulseCount} <= limit=${activeLimit} (resetting streak from ${streak.count} to 0).`
+            );
+          }
+          streak.count = 0;
+          streak.pulses = [];
         }
+
+        consecutiveBreachState.set(wrench.wrench_id, streak);
       }
     } catch (err) {
       console.warn(`[Cycle Ingestion Error for ${wrench.wrench_id}]:`, err.message);
@@ -498,7 +582,9 @@ async function scanAndIngestMountRoot(mountRoot, dateKeys) {
           continue;
         }
 
-        const csvFiles = files.filter(f => f.toLowerCase().endsWith('.csv'));
+        const csvFiles = files
+          .filter(f => f.toLowerCase().endsWith('.csv'))
+          .sort((a, b) => a.localeCompare(b));
 
         for (const file of csvFiles) {
           const fullPath = path.join(activeDateDir, file);
@@ -567,10 +653,11 @@ async function runCsvPullJob() {
   const startTime = new Date();
   const dateKeys = getDateKeys(startTime);
 
-  // Reset per-day file cache whenever the system calendar date rolls over
+  // Reset per-day file and streak caches whenever the system calendar date rolls over
   if (lastSyncedDateCompact && lastSyncedDateCompact !== dateKeys.compact) {
     processedIndividualFiles.clear();
     fileLineTracker.clear();
+    consecutiveBreachState.clear();
   }
   lastSyncedDateCompact = dateKeys.compact;
 

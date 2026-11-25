@@ -76,7 +76,9 @@ async function dispatchPulseEmailAlert({
   torque = 22.0,
   angle = 45.0,
   tighteningTime = 1.45,
-  timestamp = new Date().toISOString()
+  timestamp = new Date().toISOString(),
+  consecutiveBreaches = 1,
+  recentPulses = []
 }) {
   const emailConfig = getEmailConfig();
   if (!emailConfig.enabled) {
@@ -103,6 +105,12 @@ async function dispatchPulseEmailAlert({
 
   const smtp = getSmtpCredentials();
   const subject = `[TNGA Alert] Station ${station} - ${toolName}: ${measuredPulse} pulses (Limit: ${pulseLimit})`;
+  const streakLine = consecutiveBreaches > 1
+    ? `Sustained Breach: ${consecutiveBreaches} consecutive cycles (${recentPulses.join(', ')})`
+    : '';
+  const streakHtml = consecutiveBreaches > 1
+    ? `<strong>Sustained Breach:</strong> ${consecutiveBreaches} consecutive cycles (${recentPulses.join(', ')})<br>\n        `
+    : '';
 
   const textContent = [
     `TNGA Impact Wrench Pulse Alert`,
@@ -110,6 +118,7 @@ async function dispatchPulseEmailAlert({
     `Tool: ${toolName} (${wrenchId})`,
     `Station: ${station} | Folder: ${folder}`,
     `Measured Pulses: ${measuredPulse} (Limit: ${pulseLimit})`,
+    ...(streakLine ? [streakLine] : []),
     `Torque: ${torque} N·m`,
     `Time: ${timestamp}`,
     ``,
@@ -123,7 +132,7 @@ async function dispatchPulseEmailAlert({
         <strong>Tool:</strong> ${toolName} (${wrenchId})<br>
         <strong>Station:</strong> ${station} | <strong>Folder:</strong> ${folder}<br>
         <strong>Measured Pulses:</strong> <span style="color: #dc2626;"><strong>${measuredPulse}</strong></span> (Limit: ${pulseLimit})<br>
-        <strong>Torque:</strong> ${torque} N·m<br>
+        ${streakHtml}<strong>Torque:</strong> ${torque} N·m<br>
         <strong>Time:</strong> ${timestamp}
       </p>
       <p><a href="${smtp.dashboardUrl}">Open Monitoring Dashboard</a></p>
