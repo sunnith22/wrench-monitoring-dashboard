@@ -102,101 +102,32 @@ async function dispatchPulseEmailAlert({
   }
 
   const smtp = getSmtpCredentials();
-  const excess = measuredPulse - pulseLimit;
-  const subject = `⚠️ [TNGA ALERT] Pulse Threshold Breached: ${toolName} (Station ${station}) — Observed ${measuredPulse} pulses (Limit: ${pulseLimit})`;
+  const subject = `[TNGA Alert] Station ${station} - ${toolName}: ${measuredPulse} pulses (Limit: ${pulseLimit})`;
+
+  const textContent = [
+    `TNGA Impact Wrench Pulse Alert`,
+    ``,
+    `Tool: ${toolName} (${wrenchId})`,
+    `Station: ${station} | Folder: ${folder}`,
+    `Measured Pulses: ${measuredPulse} (Limit: ${pulseLimit})`,
+    `Torque: ${torque} N·m`,
+    `Time: ${timestamp}`,
+    ``,
+    `Dashboard: ${smtp.dashboardUrl}`
+  ].join('\n');
 
   const htmlContent = `
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <meta charset="utf-8">
-      <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background-color: #f8fafc; color: #1e293b; margin: 0; padding: 20px; }
-        .card { background: #ffffff; border-radius: 8px; border: 1px solid #e2e8f0; max-width: 600px; margin: 0 auto; overflow: hidden; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); }
-        .header { background: #dc2626; color: white; padding: 20px 24px; }
-        .header h2 { margin: 0; font-size: 18px; font-weight: 600; }
-        .badge { display: inline-block; background: rgba(255,255,255,0.2); padding: 4px 8px; border-radius: 4px; font-size: 12px; margin-top: 8px; }
-        .content { padding: 24px; }
-        .metric-box { display: flex; justify-content: space-between; background: #fef2f2; border: 1px solid #fecaca; border-radius: 6px; padding: 16px; margin: 16px 0; }
-        .metric-item { text-align: center; flex: 1; }
-        .metric-val { font-size: 26px; font-weight: 700; color: #b91c1c; }
-        .metric-lbl { font-size: 12px; color: #64748b; text-transform: uppercase; letter-spacing: 0.5px; }
-        .table { width: 100%; border-collapse: collapse; margin-top: 16px; font-size: 14px; }
-        .table td { padding: 10px 8px; border-bottom: 1px solid #f1f5f9; }
-        .table td.lbl { color: #64748b; width: 40%; font-weight: 500; }
-        .table td.val { font-weight: 600; color: #0f172a; }
-        .footer { background: #f8fafc; border-top: 1px solid #e2e8f0; padding: 16px 24px; font-size: 12px; color: #64748b; text-align: center; }
-        .btn { display: inline-block; background: #2563eb; color: white; padding: 10px 20px; border-radius: 6px; text-decoration: none; font-weight: 500; font-size: 13px; margin-top: 16px; }
-      </style>
-    </head>
-    <body>
-      <div class="card">
-        <div class="header">
-          <h2>⚠️ TNGA Impact Wrench Alert: Threshold Exceeded</h2>
-          <div class="badge">Station: ${station} | Folder: ${folder} | Tool ID: ${wrenchId}</div>
-        </div>
-        <div class="content">
-          <p>This automated alert indicates that the pulse count on <strong>${toolName}</strong> has exceeded the approved engineering limit set in the Admin Portal.</p>
-          
-          <div class="metric-box">
-            <div class="metric-item">
-              <div class="metric-val">${measuredPulse}</div>
-              <div class="metric-lbl">Measured Pulses</div>
-            </div>
-            <div class="metric-item">
-              <div class="metric-val" style="color: #475569;">${pulseLimit}</div>
-              <div class="metric-lbl">Configured Limit</div>
-            </div>
-            <div class="metric-item">
-              <div class="metric-val" style="color: #dc2626;">+${excess}</div>
-              <div class="metric-lbl">Excess Pulses</div>
-            </div>
-          </div>
-
-          <table class="table">
-            <tr>
-              <td class="lbl">Tool Description</td>
-              <td class="val">${toolName}</td>
-            </tr>
-            <tr>
-              <td class="lbl">Station / Line</td>
-              <td class="val">Station ${station}</td>
-            </tr>
-            <tr>
-              <td class="lbl">Engine Barcode</td>
-              <td class="val">${engineNumber}</td>
-            </tr>
-            <tr>
-              <td class="lbl">Measured Torque</td>
-              <td class="val">${torque} N·m</td>
-            </tr>
-            <tr>
-              <td class="lbl">Tightening Angle</td>
-              <td class="val">${angle}°</td>
-            </tr>
-            <tr>
-              <td class="lbl">Cycle Duration</td>
-              <td class="val">${tighteningTime} sec</td>
-            </tr>
-            <tr>
-              <td class="lbl">Event Timestamp</td>
-              <td class="val">${timestamp}</td>
-            </tr>
-          </table>
-
-          <p style="font-size: 13px; color: #64748b; margin-top: 16px;">
-            <strong>Action Required:</strong> Inspect tool joint lubricity and mechanical pulse unit. If wear is confirmed, replace tool or adjust threshold in the Admin Portal.
-          </p>
-
-          <a href="${smtp.dashboardUrl}/wrench/${wrenchId}" class="btn">View Tool Analysis in Dashboard</a>
-        </div>
-        <div class="footer">
-          Toyota Industries Engine India • TNGA Production Line<br>
-          To change this limit or alert recipients, login to the Admin Portal at <a href="${smtp.adminPortalUrl}">${smtp.adminPortalUrl}</a>
-        </div>
-      </div>
-    </body>
-    </html>
+    <div style="font-family: Arial, sans-serif; font-size: 14px; color: #111827; line-height: 1.6;">
+      <p><strong>TNGA Impact Wrench Pulse Alert</strong></p>
+      <p>
+        <strong>Tool:</strong> ${toolName} (${wrenchId})<br>
+        <strong>Station:</strong> ${station} | <strong>Folder:</strong> ${folder}<br>
+        <strong>Measured Pulses:</strong> <span style="color: #dc2626;"><strong>${measuredPulse}</strong></span> (Limit: ${pulseLimit})<br>
+        <strong>Torque:</strong> ${torque} N·m<br>
+        <strong>Time:</strong> ${timestamp}
+      </p>
+      <p><a href="${smtp.dashboardUrl}">Open Monitoring Dashboard</a></p>
+    </div>
   `;
 
   try {
@@ -205,6 +136,7 @@ async function dispatchPulseEmailAlert({
       from: smtp.from,
       to: recipients.join(', '),
       subject,
+      text: textContent,
       html: htmlContent
     });
 
@@ -243,15 +175,13 @@ async function sendTestEmail(testRecipient) {
   const smtp = getSmtpCredentials();
 
   const mailer = getMailTransporter();
-  const subject = '✅ [TNGA TEST] Pulse Alert System - Test Notification';
+  const subject = '[TNGA Test] Pulse Alert System Verification';
+  const text = `TNGA Pulse Alert System test email verified.\nSMTP Host: ${smtp.host}\nTime: ${new Date().toISOString()}`;
   const html = `
-    <div style="font-family: sans-serif; padding: 20px; background: #f8fafc;">
-      <div style="background: white; padding: 24px; border-radius: 8px; border: 1px solid #e2e8f0; max-width: 500px;">
-        <h3 style="color: #16a34a; margin-top:0;">✅ SMTP Connection Successful</h3>
-        <p>This is a test notification from the <strong>TNGA Pulse Monitoring & Admin Portal</strong>.</p>
-        <p>Your email parameters configured in <code>.env</code> (Host: <strong>${smtp.host}</strong>) are successfully verified and ready to dispatch real-time alerts when any tool crosses its configured pulse limit.</p>
-        <p style="font-size: 12px; color: #64748b;">Timestamp: ${new Date().toISOString()}</p>
-      </div>
+    <div style="font-family: Arial, sans-serif; font-size: 14px; color: #111827; line-height: 1.6;">
+      <p><strong>TNGA Pulse Alert System - Test Email</strong></p>
+      <p>Your email configuration (SMTP Host: ${smtp.host}) is verified and ready to send pulse limit alerts.</p>
+      <p style="font-size: 12px; color: #6b7280;">Time: ${new Date().toISOString()}</p>
     </div>
   `;
 
@@ -260,6 +190,7 @@ async function sendTestEmail(testRecipient) {
       from: smtp.from,
       to: recipient,
       subject,
+      text,
       html
     });
 
