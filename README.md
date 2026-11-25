@@ -71,7 +71,7 @@ The system monitors 73 tightening tools across **Assembly 1, Assembly 2, and Ass
 
 ### 2. Installation & Run
 
-#### Backend (Port 8140)
+#### Backend (Port 8143)
 ```bash
 cd backend
 npm install
@@ -92,7 +92,7 @@ Double-click `start_tnga_dashboard.bat` to launch both backend and frontend serv
 
 ## 📡 Endpoints
 - **Frontend**: `http://localhost:3010`
-- **Backend API**: `http://localhost:8140`
-- **Health Check**: `http://localhost:8140/health`
-- **Overview API**: `http://localhost:8140/api/dashboard/overview`
-- **Daily Trends API**: `http://localhost:8140/api/trends/daily?wrench_id=URYU_ST28_F016&days=8`
+- **Backend API**: `http://localhost:8143`
+- **Health Check**: `http://localhost:8143/health`
+- **Overview API**: `http://localhost:8143/api/dashboard/overview`
+- **Daily Trends API**: `http://localhost:8143/api/trends/daily?wrench_id=URYU_ST28_F016&days=8`

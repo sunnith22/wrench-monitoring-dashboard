@@ -16,7 +16,7 @@ const mountApiRoutes = require('./src/routes/mountApiRoutes');
 const { startDynamicSyncScheduler } = require('./src/services/shiftSyncWorker');
 
 const app = express();
-const PORT = process.env.PORT || 8140;
+const PORT = process.env.PORT || 8143;
 
 app.use(cors());
 app.use(express.json());
