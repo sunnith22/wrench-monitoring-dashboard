@@ -34,7 +34,7 @@ import {
 export default function WrenchAnalysisPage({ wrenchId, onSelectWrench }) {
   const [wrenchesList, setWrenchesList] = useState([]);
   const [selectedId, setSelectedId] = useState(wrenchId || 'URYU_ST28_F016');
-  const [selectedDate, setSelectedDate] = useState(() => new Date().toLocaleDateString('en-CA'));
+  const [selectedDate, setSelectedDate] = useState(() => new Date().toISOString().split('T')[0]);
   const [wrenchData, setWrenchData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [filterAborts, setFilterAborts] = useState(false);

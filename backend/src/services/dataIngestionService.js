@@ -1,6 +1,5 @@
 const crypto = require('crypto');
 const { query, localFallbackCycles } = require('../config/postgresDB');
-const { getLocalDateKeys, extractDateIso } = require('../utils/dateUtils');
 
 /**
  * Generate a unique deterministic composite key for deduplication
@@ -42,21 +41,22 @@ function cacheLiveRecords(records) {
 }
 
 /**
- * Fetch tightening data for a given wrench asset and calendar date (defaults to TODAY only):
- * Tier 1: Query PostgreSQL `wrench_tightening_cycles` on 10.82.126.44 (filtered strictly by date)
+ * Fetch tightening data for a given wrench asset and calendar date:
+ * Tier 1: Query PostgreSQL `wrench_tightening_cycles` on 10.82.126.44 FIRST (fast < 5ms index lookup)
  * Tier 2: Check local in-memory live store (`localFallbackCycles`)
+ * Tier 3: Upstream line PC API fallback (only if enabled via environment flag)
  */
 async function fetchWrenchOperations(wrenchAsset, dateStr) {
-  const targetDate = dateStr || getLocalDateKeys().iso;
+  const targetDate = dateStr || new Date().toISOString().split('T')[0];
+  const dateKey = targetDate.replace(/-/g, '');
 
-  // 1. Try PostgreSQL on 10.82.126.44 FIRST (central source of truth, date-filtered)
+  // 1. Try PostgreSQL on 10.82.126.44 FIRST (central source of truth)
   try {
     const sqlRes = await query(
       `SELECT * FROM wrench_tightening_cycles 
        WHERE (wrench_id = $1 OR (station = $2 AND folder = $3))
-         AND (tightening_time::timestamptz AT TIME ZONE 'Asia/Kolkata')::date = $4::date
        ORDER BY tightening_time ASC`,
-      [wrenchAsset.wrench_id, wrenchAsset.station, wrenchAsset.folder, targetDate]
+      [wrenchAsset.wrench_id, wrenchAsset.station, wrenchAsset.folder]
     );
 
     if (sqlRes && sqlRes.rows && sqlRes.rows.length > 0) {
@@ -69,7 +69,7 @@ async function fetchWrenchOperations(wrenchAsset, dateStr) {
         station: row.station,
         folder: row.folder,
         brand: wrenchAsset.brand,
-        timestamp: row.tightening_time instanceof Date ? row.tightening_time.toISOString() : String(row.tightening_time),
+        timestamp: row.tightening_time,
         reception_timestamp: row.reception_time || row.tightening_time,
         work_no: String(row.cycle_counter || 1),
         engine_number: row.engine_no,
@@ -89,10 +89,10 @@ async function fetchWrenchOperations(wrenchAsset, dateStr) {
     // Continue to local store fallback
   }
 
-  // 2. Check cached live records in local store (strictly filtered to targetDate)
+  // 2. Check cached live records in local store
   const cached = localFallbackCycles.filter(
     c => (c.wrench_id === wrenchAsset.wrench_id || (c.station === wrenchAsset.station && c.folder === wrenchAsset.folder)) &&
-         extractDateIso(c.tightening_time) === targetDate
+         (!dateStr || (c.tightening_time && c.tightening_time.startsWith(targetDate)))
   );
   if (cached.length > 0) {
     return cached.map(row => ({
