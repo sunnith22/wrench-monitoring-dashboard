@@ -3,155 +3,139 @@ const axios = require('axios');
 const router = express.Router();
 const { ALL_WRENCH_ASSETS } = require('../data/wrenchCatalog');
 const { localFallbackCycles, getPostgresStatus, query } = require('../config/postgresDB');
-
-// In-Memory store for active alert records (starts clean for live shift)
-const inMemoryAlerts = [];
+const { inMemoryAlerts, recordAlert } = require('../services/alertStore');
+const { getLocalDateKeys, extractDateIso } = require('../utils/dateUtils');
 
 /**
- * GET /api/dashboard/overview - Management KPIs, OK/NG Donut, Assembly Health & Feed Status
+ * GET /api/dashboard/overview - Management KPIs (TODAY ONLY from PostgreSQL),
+ * OK/NG Donut, Assembly Navigation Cards & Active Priority Alerts.
  */
-
 router.get('/', async (req, res) => {
+  const totalWrenches = ALL_WRENCH_ASSETS.length; // 73
+  const activeWrenches = ALL_WRENCH_ASSETS.filter(w => w.status === 'ACTIVE').length;
 
-  const totalWrenches = ALL_WRENCH_ASSETS.length;
-  const activeWrenches = ALL_WRENCH_ASSETS.filter(
-    w => w.status === 'ACTIVE'
-  ).length;
+  const assy1Tools = ALL_WRENCH_ASSETS.filter(w => w.assembly_id === 'assembly-1').length;
+  const assy2Tools = ALL_WRENCH_ASSETS.filter(w => w.assembly_id === 'assembly-2').length;
+  const assy3Tools = ALL_WRENCH_ASSETS.filter(w => w.assembly_id === 'assembly-3').length;
 
-  const assy1Tools = ALL_WRENCH_ASSETS.filter(
-    w => w.assembly_id === 'assembly-1'
-  ).length;
-
-  const assy2Tools = ALL_WRENCH_ASSETS.filter(
-    w => w.assembly_id === 'assembly-2'
-  ).length;
-
-  const assy3Tools = ALL_WRENCH_ASSETS.filter(
-    w => w.assembly_id === 'assembly-3'
-  ).length;
-
-  let totalOperations = 0;
-  let totalPulses = 0;
-  let ngOperations = 0;
-  let okOperations = 0;
-  let okPercentage = 0;
-  let ngPercentage = 0;
-
-  try {
-
-    const pulseResponse = await axios.get(
-      'http://localhost:9000/api/today-pulse-all'
-    );
-
-    const pulseData = pulseResponse.data;
-
-    totalOperations = pulseData.totalRecords || 0;
-    totalPulses = pulseData.totalPulses || 0;
-
-    okOperations = totalOperations;
-    ngOperations = 0;
-
-    okPercentage =
-      totalOperations > 0 ? 100 : 0;
-
-    ngPercentage = 0;
-
-  } catch (err) {
-
-    console.error(
-      'Pulse API unavailable:',
-      err.message
-    );
-
-  }
-
+  const todayIso = getLocalDateKeys().iso;
   const pgStatus = getPostgresStatus();
 
-  const openAlertsCount =
-    inMemoryAlerts.filter(
-      a => a.status === 'OPEN'
-    ).length;
+  // Compute live TODAY-ONLY KPIs from PostgreSQL (or local fallback store)
+  const todayLocal = localFallbackCycles.filter(c => extractDateIso(c.tightening_time) === todayIso);
+  let totalOperations = todayLocal.length;
+  let ngOperations = todayLocal.filter(c => c.torque_status === 'NG' || c.pulse_status === 'CRITICAL').length;
+  let totalPulses = todayLocal.reduce((acc, c) => acc + (Number(c.pulse_count) || 0), 0);
+  let feedSourceLabel = pgStatus.activeSource;
 
-  const acknowledgedAlertsCount =
-    inMemoryAlerts.filter(
-      a => a.status === 'ACKNOWLEDGED'
-    ).length;
+  if (pgStatus.connected && pgStatus.tablesReady) {
+    try {
+      const sqlRes = await query(
+        `SELECT 
+          COUNT(*) as total,
+          COUNT(*) FILTER (WHERE torque_status = 'NG' OR pulse_status = 'CRITICAL') as ng_count,
+          COALESCE(SUM(pulse_count), 0) as total_pulses
+         FROM wrench_tightening_cycles
+         WHERE (tightening_time::timestamptz AT TIME ZONE 'Asia/Kolkata')::date = $1::date;`,
+        [todayIso]
+      );
+      if (sqlRes && sqlRes.rows && sqlRes.rows[0]) {
+        totalOperations = parseInt(sqlRes.rows[0].total || 0, 10);
+        ngOperations = parseInt(sqlRes.rows[0].ng_count || 0, 10);
+        totalPulses = parseInt(sqlRes.rows[0].total_pulses || 0, 10);
+        feedSourceLabel = `PostgreSQL (${pgStatus.database} • Today)`;
+      }
+    } catch (sqlErr) {
+      // Fall back to todayLocal computed above
+    }
+  }
+
+  // Optional external Pulse API supplement ONLY if explicitly configured in .env
+  const pulseApiUrl = process.env.PULSE_API_URL;
+  if (pulseApiUrl && totalOperations === 0) {
+    try {
+      const pulseResponse = await axios.get(pulseApiUrl, { timeout: 800 });
+      const pulseData = pulseResponse.data;
+      if (pulseData && typeof pulseData.totalRecords === 'number') {
+        totalOperations = pulseData.totalRecords || 0;
+        totalPulses = pulseData.totalPulses || 0;
+        feedSourceLabel = 'External Pulse API';
+      }
+    } catch (err) {
+      // Stay silently on PostgreSQL if optional external API is offline
+    }
+  }
+
+  const okOperations = Math.max(0, totalOperations - ngOperations);
+  const okPercentage = totalOperations > 0 ? Number(((okOperations / totalOperations) * 100).toFixed(1)) : 100;
+  const ngPercentage = totalOperations > 0 ? Number(((ngOperations / totalOperations) * 100).toFixed(1)) : 0;
+
+  const openAlerts = inMemoryAlerts.filter(a => a.status === 'OPEN');
+  const acknowledgedAlertsCount = inMemoryAlerts.filter(a => a.status === 'ACKNOWLEDGED').length;
+
+  const countOpenByAssembly = (assemblyName) =>
+    openAlerts.filter(a => a.assembly_name === assemblyName).length;
+
+  const assy1Open = countOpenByAssembly('Assembly 1');
+  const assy2Open = countOpenByAssembly('Assembly 2');
+  const assy3Open = countOpenByAssembly('Assembly 3');
 
   res.json({
     success: true,
+    date: todayIso,
     timestamp: new Date().toISOString(),
     last_data_update: new Date().toLocaleTimeString(),
-    data_feed_health: 'Pulse API Live',
+    data_feed_health: `OPTIMAL (${feedSourceLabel})`,
     database_status: pgStatus,
-
     kpi: {
       total_registered_wrenches: totalWrenches,
       active_wrenches: activeWrenches,
-
       total_operations: totalOperations,
       total_pulses: totalPulses,
-
       ok_count: okOperations,
       ng_count: ngOperations,
-
       ok_percentage: okPercentage,
       ng_percentage: ngPercentage,
-
-      open_alerts: openAlertsCount,
+      open_alerts: openAlerts.length,
       acknowledged_alerts: acknowledgedAlertsCount,
       total_alerts: inMemoryAlerts.length
     },
-
     judgement_donut: [
+      { name: 'OK Tightenings', value: okOperations, percentage: okPercentage, color: '#10b981' },
+      { name: 'NG Tightenings', value: ngOperations, percentage: ngPercentage, color: '#ef4444' }
+    ],
+    assembly_cards: [
       {
-        name: 'OK Tightenings',
-        value: okOperations,
-        percentage: okPercentage,
-        color: '#10b981'
+        id: 'assembly-1',
+        name: 'Assembly 1',
+        subtitle: 'Block, Head & Cam Housing Sub-Assemblies',
+        tool_count: assy1Tools,
+        open_alerts: assy1Open,
+        status: assy1Open > 0 ? 'WARNING' : 'NORMAL',
+        sub_assemblies: ['Block Sub-Assy (5)', 'Head Sub-Assy (3)', 'Cam Housing (7)']
       },
       {
-        name: 'NG Tightenings',
-        value: ngOperations,
-        percentage: ngPercentage,
-        color: '#ef4444'
+        id: 'assembly-2',
+        name: 'Assembly 2',
+        subtitle: 'Main Engine Assembly Lines MK1, MK2, MK3',
+        tool_count: assy2Tools,
+        open_alerts: assy2Open,
+        status: assy2Open > 0 ? 'WARNING' : 'NORMAL',
+        sub_assemblies: ['MK1 (16)', 'MK2 (5)', 'MK3 (33)']
+      },
+      {
+        id: 'assembly-3',
+        name: 'Assembly 3',
+        subtitle: 'Engine Testing (ET) & Sub-Part Supply (SPS)',
+        tool_count: assy3Tools,
+        open_alerts: assy3Open,
+        status: assy3Open > 0 ? 'WARNING' : 'NORMAL',
+        sub_assemblies: ['ET — Testing (1)', 'SPS — Supply (3)']
       }
     ],
-
     recent_alerts: inMemoryAlerts.slice(0, 5)
   });
 });
-
-function recordAlert(alertData) {
-  const existing = inMemoryAlerts.find(a =>
-    a.wrench_id === alertData.wrench_id &&
-    a.rule_reason === alertData.rule_reason &&
-    a.status !== 'CLOSED'
-  );
-  if (!existing) {
-    const newAlert = {
-      alert_id: `ALT-${1000 + inMemoryAlerts.length + 1}`,
-      wrench_id: alertData.wrench_id,
-      tool_name: alertData.tool_name,
-      assembly_name: alertData.assembly_name,
-      sub_assembly_name: alertData.sub_assembly_name,
-      station: alertData.station,
-      event_time: alertData.event_time || new Date(),
-      severity: alertData.severity || 'CRITICAL',
-      rule_reason: alertData.rule_reason || 'INCREASING_PULSE_TREND',
-      observed_value: alertData.observed_value,
-      threshold_limit: alertData.threshold_limit,
-      unit: alertData.unit || 'pulses/day',
-      engine_number: alertData.engine_number || 'N/A',
-      work_no: alertData.work_no || '1',
-      status: 'OPEN',
-      investigation_notes: alertData.investigation_notes || 'Automatic predictive alert: Sustained daily pulse increase detected.',
-      action_taken: ''
-    };
-    inMemoryAlerts.unshift(newAlert);
-    return newAlert;
-  }
-  return existing;
-}
 
 module.exports = {
   router,

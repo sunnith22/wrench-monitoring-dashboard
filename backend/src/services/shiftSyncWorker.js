@@ -1,9 +1,7 @@
-const axios = require('axios');
-const { RAW_URYU_TOOLS, ALL_WRENCH_ASSETS } = require('../data/wrenchCatalog');
-const { getSchedule, getToolThreshold, getToolThresholdDetails, recordAudit } = require('./configService');
-const { dispatchPulseEmailAlert } = require('./emailService');
+const { getSchedule } = require('./configService');
 const { query, getPostgresStatus } = require('../config/postgresDB');
 const { runCsvPullJob, getCsvIngestionStatus } = require('./csvIngestionService');
+const { getLocalDateKeys } = require('../utils/dateUtils');
 
 const SYNC_INTERVAL_MINUTES = parseInt(process.env.SYNC_INTERVAL_MINUTES || '5', 10);
 const SYNC_INTERVAL_MS = SYNC_INTERVAL_MINUTES * 60 * 1000;
@@ -13,6 +11,7 @@ let lastSyncResult = {
   timestamp: null,
   windowName: 'None',
   totalFetched: 0,
+  totalInserted: 0,
   alertsTriggered: 0,
   status: 'IDLE'
 };
@@ -30,10 +29,9 @@ function isTimeInWindow(startTime, endTime, now = new Date()) {
   return curMinutes >= startMinutes && curMinutes <= endMinutes;
 }
 
-const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
-
 /**
- * Executes a sync pass across production tools, writing into PostgreSQL and triggering alerts
+ * Executes a TODAY-ONLY sync pass across mounted production tools,
+ * writing into PostgreSQL (tnga_wrench_db) and evaluating alerts.
  */
 async function runSyncPass(windowLabel = 'Manual Trigger') {
   if (isSyncRunning) {
@@ -47,43 +45,23 @@ async function runSyncPass(windowLabel = 'Manual Trigger') {
   lastSyncResult.windowName = windowLabel;
   lastSyncResult.timestamp = syncStartTime.toISOString();
 
-  console.log(`\n🚀 [ShiftSync / SQL Ingestion] Starting data extraction: "${windowLabel}" [${syncBatchId}] at ${syncStartTime.toLocaleTimeString()}...`);
+  console.log(`\n🚀 [Backend Sync] Starting today-only extraction: "${windowLabel}" [${syncBatchId}] at ${syncStartTime.toLocaleTimeString()}...`);
 
-  // Log start in PostgreSQL shift_sync_logs
   try {
     await query(
       `INSERT INTO shift_sync_logs (sync_id, sync_source, window_name, start_time, status)
        VALUES ($1, $2, $3, $4, $5)`,
-      [syncBatchId, 'ADF_PIPELINE', windowLabel, syncStartTime, 'RUNNING']
+      [syncBatchId, 'BACKEND_MOUNT_SYNC', windowLabel, syncStartTime, 'RUNNING']
     );
   } catch (logErr) {
     console.warn(`[Sync Log Warning]: ${logErr.message}`);
   }
 
-  // If Azure Data Factory REST trigger is configured, invoke the ADF pipeline
-  if (ADF_TRIGGER_URL) {
-    try {
-      console.log(`📡 [ADF Remote] Triggering Azure Data Factory Pipeline at ${ADF_TRIGGER_URL}...`);
-      const adfResp = await axios.post(ADF_TRIGGER_URL, {
-        windowName: windowLabel,
-        shiftDate: syncStartTime.toISOString().split('T')[0].replace(/-/g, '')
-      }, { timeout: 5000 });
-      console.log(`✅ [ADF Remote] Pipeline run initiated: runId=${adfResp.data?.runId || 'SUCCESS'}`);
-    } catch (adfErr) {
-      console.warn(`⚠️ [ADF Remote Warning] ADF REST trigger unreachable: ${adfErr.message}. Executing local SQL ingestion...`);
-    }
-  }
-
-  let totalFetched = 0;
-  let totalInserted = 0;
-  let alertsTriggered = 0;
-
   try {
-    // 1. Run the stealth CSV / Mount Ingestion Job (reading /mnt/torque_wrench & /mnt/yokota or server APIs)
     const pullResult = await runCsvPullJob();
-    totalFetched = pullResult.filesProcessed || 0;
-    totalInserted = pullResult.rowsIngested || 0;
-    alertsTriggered = pullResult.alertsTriggered || 0;
+    const totalFetched = pullResult.filesProcessed || 0;
+    const totalInserted = pullResult.rowsIngested || 0;
+    const alertsTriggered = pullResult.alertsTriggered || 0;
 
     const syncEndTime = new Date();
     lastSyncResult = {
@@ -95,7 +73,6 @@ async function runSyncPass(windowLabel = 'Manual Trigger') {
       status: 'SUCCESS'
     };
 
-    // Update PostgreSQL shift_sync_logs
     try {
       await query(
         `UPDATE shift_sync_logs 
@@ -103,15 +80,13 @@ async function runSyncPass(windowLabel = 'Manual Trigger') {
          WHERE sync_id = $4`,
         [syncEndTime, totalFetched, totalInserted, syncBatchId]
       );
-    } catch (logEndErr) {
-      // Handled
-    }
+    } catch (logEndErr) {}
 
-    console.log(`✅ [ShiftSync / SQL Ingestion] Finished "${windowLabel}": ${totalFetched} files checked, ${totalInserted} saved to PostgreSQL.`);
+    console.log(`✅ [Backend Sync] Finished "${windowLabel}": ${totalFetched} today files checked, ${totalInserted} saved to PostgreSQL.`);
     return { success: true, ...lastSyncResult };
   } catch (err) {
     lastSyncResult.status = 'ERROR';
-    console.error(`❌ [ShiftSync Error] Failed during ${windowLabel}:`, err.message);
+    console.error(`❌ [Backend Sync Error] Failed during ${windowLabel}:`, err.message);
 
     try {
       await query(
@@ -127,33 +102,42 @@ async function runSyncPass(windowLabel = 'Manual Trigger') {
 }
 
 /**
- * Clock Tick Runner: checks every 30s against all dynamic windows in configService
- * ZERO CONTINUOUS LOAD: Pulls ONLY during Admin Shift Windows (e.g. Tea Break, Lunch)
- * or when manually triggered via Admin Portal.
+ * Clock Tick Runner: checks every 30s against all dynamic windows in configService.
+ * ZERO CONTINUOUS LOAD by default: pulls strictly during Admin Shift Windows
+ * (or on SYNC_ON_STARTUP=true / ENABLE_CONTINUOUS_SYNC=true via .env).
  */
 function startDynamicSyncScheduler() {
   const ENABLE_CONTINUOUS_SYNC = process.env.ENABLE_CONTINUOUS_SYNC === 'true';
+  const SYNC_ON_STARTUP = process.env.SYNC_ON_STARTUP === 'true';
+
+  if (SYNC_ON_STARTUP) {
+    setTimeout(async () => {
+      try {
+        await runSyncPass('Startup Today-Only Sync');
+      } catch (err) {
+        console.warn(`[Startup Sync Warning]: ${err.message}`);
+      }
+    }, 3000);
+  }
 
   if (ENABLE_CONTINUOUS_SYNC) {
-    console.log(`⏰ [Dynamic Scheduler] Continuous Pull ACTIVE every ${SYNC_INTERVAL_MINUTES} mins.`);
+    console.log(`⏰ [Dynamic Scheduler] Continuous Today-Only Pull ACTIVE every ${SYNC_INTERVAL_MINUTES} mins.`);
     setInterval(async () => {
       try {
-        await runSyncPass('Periodic Interval Pull');
+        await runSyncPass('Periodic Interval Pull (Today)');
       } catch (err) {
         console.warn(`[Periodic Pull Warning]: ${err.message}`);
       }
     }, SYNC_INTERVAL_MS);
   } else {
-    console.log(`⏰ [Dynamic Scheduler] Mode: ADMIN_SCHEDULE_ONLY (Zero continuous load).`);
-    console.log(`   Pulls will execute ONLY during Admin Shift Windows (e.g. Tea Break, Lunch) or on manual trigger.`);
+    console.log(`⏰ [Dynamic Scheduler] Mode: ADMIN_SCHEDULE_ONLY (Zero continuous load on line PC).`);
+    console.log(`   Today-only pulls run automatically during break windows or manual Admin trigger.`);
   }
 
-  // Shift Window Watcher: checks every 30 seconds against Admin Portal schedule
   setInterval(async () => {
     const now = new Date();
-    const todayStr = now.toISOString().split('T')[0];
+    const todayStr = getLocalDateKeys(now).iso;
 
-    // Reset daily executed window cache at midnight
     if (now.getHours() === 0 && now.getMinutes() === 0 && now.getSeconds() < 30) {
       completedWindowsToday.clear();
     }

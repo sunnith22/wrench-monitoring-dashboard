@@ -12,7 +12,6 @@ const toolChangeRoutes = require('./src/routes/toolChangeRoutes');
 const alertsRoutes = require('./src/routes/alertsRoutes');
 const rawRecordsRoutes = require('./src/routes/rawRecordsRoutes');
 const adminRoutes = require('./src/routes/adminRoutes');
-const mountApiRoutes = require('./src/routes/mountApiRoutes');
 const { startDynamicSyncScheduler } = require('./src/services/shiftSyncWorker');
 
 const app = express();
@@ -30,7 +29,6 @@ app.use('/api/tool-changes', toolChangeRoutes);
 app.use('/api/alerts', alertsRoutes);
 app.use('/api/data/records', rawRecordsRoutes);
 app.use('/api/admin', adminRoutes);
-app.use('/api/mount', mountApiRoutes);
 
 // Health Endpoint
 app.get('/health', (req, res) => {
@@ -50,7 +48,6 @@ app.listen(PORT, async () => {
   console.log(`📡 Health Check: http://localhost:${PORT}/health`);
   console.log(`🔧 Overview API: http://localhost:${PORT}/api/dashboard/overview`);
   console.log(`⚙️ Admin API: http://localhost:${PORT}/api/admin/schedule`);
-  console.log(`🔌 Mount API: http://localhost:${PORT}/api/mount/telemetry?folder=029`);
   console.log('=======================================================');
   await initializeTables();
   startDynamicSyncScheduler();

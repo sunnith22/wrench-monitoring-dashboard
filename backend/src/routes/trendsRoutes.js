@@ -4,28 +4,26 @@ const { ALL_WRENCH_ASSETS } = require('../data/wrenchCatalog');
 const { fetchWrenchOperations } = require('../services/dataIngestionService');
 const { getToolThreshold } = require('../services/configService');
 const { localFallbackCycles, query, getPostgresStatus } = require('../config/postgresDB');
+const { getLocalDateKeys, extractDateIso } = require('../utils/dateUtils');
 
 /**
  * Builds daily average pulse trend strictly from REAL ingested shop-floor operations.
- * Queries PostgreSQL on 10.82.126.44 (or fallback in-memory cache) across historical days.
+ * Queries PostgreSQL on 10.82.126.44 (or fallback in-memory cache) bounded to daysCount.
  * NO simulated data, NO fake tool changes, NO fake alerts.
  */
 async function buildRealDailyPulseTrend(wrench, daysCount = 8) {
   const threshold = wrench.default_pulse_threshold || 25;
   const today = new Date();
-  const todayStr = today.toISOString().split('T')[0];
+  const todayStr = getLocalDateKeys(today).iso;
 
-  // 1. Ingest/fetch operations for today
-  const todayRecords = await fetchWrenchOperations(wrench, todayStr);
-
-  // 2. Fetch multi-day records from PostgreSQL if available
+  // 1. Fetch multi-day records from PostgreSQL (bounded strictly by daysCount)
   let pgDayMap = new Map();
   const pgStatus = getPostgresStatus();
   if (pgStatus.connected && pgStatus.tablesReady) {
     try {
       const sqlRes = await query(`
         SELECT 
-          LEFT(tightening_time, 10) as cycle_date,
+          TO_CHAR(tightening_time::timestamptz AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD') as cycle_date,
           AVG(pulse_count) as avg_pulse,
           MIN(pulse_count) as min_pulse,
           MAX(pulse_count) as max_pulse,
@@ -33,9 +31,10 @@ async function buildRealDailyPulseTrend(wrench, daysCount = 8) {
           COUNT(*) FILTER (WHERE torque_status = 'OK') as ok_count
         FROM wrench_tightening_cycles
         WHERE wrench_id = $1
-        GROUP BY LEFT(tightening_time, 10)
+          AND (tightening_time::timestamptz AT TIME ZONE 'Asia/Kolkata')::date >= ($2::date - ($3::integer - 1))
+        GROUP BY TO_CHAR(tightening_time::timestamptz AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD')
         ORDER BY cycle_date ASC;
-      `, [wrench.wrench_id]);
+      `, [wrench.wrench_id, todayStr, daysCount]);
 
       if (sqlRes && sqlRes.rows) {
         for (const row of sqlRes.rows) {
@@ -47,6 +46,8 @@ async function buildRealDailyPulseTrend(wrench, daysCount = 8) {
     }
   }
 
+  const todayRecords = pgDayMap.size === 0 ? await fetchWrenchOperations(wrench, todayStr) : [];
+
   const points = [];
   let alertDay = null;
   let toolChangeDay = null;
@@ -54,7 +55,7 @@ async function buildRealDailyPulseTrend(wrench, daysCount = 8) {
   for (let i = 1; i <= daysCount; i++) {
     const dayDate = new Date(today);
     dayDate.setDate(today.getDate() - (daysCount - i));
-    const dateStr = dayDate.toISOString().split('T')[0];
+    const dateStr = getLocalDateKeys(dayDate).iso;
     const dateDisplay = dayDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 
     let avgPulse = 0;
@@ -76,10 +77,12 @@ async function buildRealDailyPulseTrend(wrench, daysCount = 8) {
     } else {
       // Fallback to local records
       let dayRecords = [];
-      if (dateStr === todayStr) {
+      if (dateStr === todayStr && todayRecords.length > 0) {
         dayRecords = todayRecords;
       } else {
-        dayRecords = localFallbackCycles.filter(c => c.wrench_id === wrench.wrench_id && c.tightening_time && c.tightening_time.startsWith(dateStr));
+        dayRecords = localFallbackCycles.filter(
+          c => c.wrench_id === wrench.wrench_id && extractDateIso(c.tightening_time) === dateStr
+        );
       }
 
       if (dayRecords.length > 0) {

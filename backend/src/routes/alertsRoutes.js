@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { inMemoryAlerts } = require('./overviewRoutes');
+const { inMemoryAlerts } = require('../services/alertStore');
 
 /**
  * GET /api/alerts - Persistent Alert Tracker & Filter
