@@ -1,5 +1,6 @@
 const crypto = require('crypto');
 const { query, localFallbackCycles } = require('../config/postgresDB');
+const { getSystemDateKeys, extractDateIso } = require('../utils/dateUtils');
 
 /**
  * Generate a unique deterministic composite key for deduplication
@@ -47,16 +48,17 @@ function cacheLiveRecords(records) {
  * Tier 3: Upstream line PC API fallback (only if enabled via environment flag)
  */
 async function fetchWrenchOperations(wrenchAsset, dateStr) {
-  const targetDate = dateStr || new Date().toISOString().split('T')[0];
+  const targetDate = dateStr || getSystemDateKeys().iso;
   const dateKey = targetDate.replace(/-/g, '');
 
-  // 1. Try PostgreSQL on 10.82.126.44 FIRST (central source of truth)
+  // 1. Try PostgreSQL on 10.82.126.44 FIRST (filtered strictly to targetDate / system today)
   try {
     const sqlRes = await query(
       `SELECT * FROM wrench_tightening_cycles 
        WHERE (wrench_id = $1 OR (station = $2 AND folder = $3))
+         AND TO_CHAR(tightening_time::timestamptz, 'YYYY-MM-DD') = $4
        ORDER BY tightening_time ASC`,
-      [wrenchAsset.wrench_id, wrenchAsset.station, wrenchAsset.folder]
+      [wrenchAsset.wrench_id, wrenchAsset.station, wrenchAsset.folder, targetDate]
     );
 
     if (sqlRes && sqlRes.rows && sqlRes.rows.length > 0) {
@@ -69,7 +71,7 @@ async function fetchWrenchOperations(wrenchAsset, dateStr) {
         station: row.station,
         folder: row.folder,
         brand: wrenchAsset.brand,
-        timestamp: row.tightening_time,
+        timestamp: row.tightening_time instanceof Date ? row.tightening_time.toISOString() : String(row.tightening_time),
         reception_timestamp: row.reception_time || row.tightening_time,
         work_no: String(row.cycle_counter || 1),
         engine_number: row.engine_no,
@@ -89,10 +91,10 @@ async function fetchWrenchOperations(wrenchAsset, dateStr) {
     // Continue to local store fallback
   }
 
-  // 2. Check cached live records in local store
+  // 2. Check cached live records in local store (strictly matching targetDate)
   const cached = localFallbackCycles.filter(
     c => (c.wrench_id === wrenchAsset.wrench_id || (c.station === wrenchAsset.station && c.folder === wrenchAsset.folder)) &&
-         (!dateStr || (c.tightening_time && c.tightening_time.startsWith(targetDate)))
+         extractDateIso(c.tightening_time) === targetDate
   );
   if (cached.length > 0) {
     return cached.map(row => ({

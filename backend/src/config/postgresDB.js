@@ -88,6 +88,15 @@ try {
     connectionTimeoutMillis: 3500     // Return error if connection cannot be acquired in 3.5s
   });
 
+  // Align PostgreSQL session timezone with Node host system timezone so system-date queries match
+  const tzOffsetMin = -new Date().getTimezoneOffset();
+  const tzSign = tzOffsetMin >= 0 ? '+' : '-';
+  const tzAbs = Math.abs(tzOffsetMin);
+  const tzSqlInterval = `${tzSign}${String(Math.floor(tzAbs / 60)).padStart(2, '0')}:${String(tzAbs % 60).padStart(2, '0')}`;
+  pool.on('connect', (client) => {
+    client.query(`SET TIME ZONE INTERVAL '${tzSqlInterval}';`).catch(() => {});
+  });
+
   // Test connection on startup
   pool.connect(async (err, client, release) => {
     if (err) {
@@ -164,14 +173,18 @@ function executeInMemoryQuery(text, params) {
   if (sql.startsWith('SELECT') && sql.includes('WRENCH_TIGHTENING_CYCLES')) {
     let rows = [...localFallbackCycles];
 
-    // Handle filtering by wrench_id or station/folder
+    // Handle filtering by wrench_id / station / folder / system date
     if (params.length > 0) {
       const wrenchId = params[0];
       const station = params[1];
       const folder = params[2];
+      const targetDate = params[3];
 
       if (wrenchId) {
         rows = rows.filter(r => r.wrench_id === wrenchId || (r.station === station && r.folder === folder));
+      }
+      if (targetDate && /^\d{4}-\d{2}-\d{2}$/.test(String(targetDate))) {
+        rows = rows.filter(r => String(r.tightening_time || '').startsWith(targetDate));
       }
     }
 
@@ -240,7 +253,7 @@ function getPostgresStatus() {
     user: POSTGRES_USER,
     error: connectionError,
     inMemoryRecords: localFallbackCycles.length,
-    activeSource: isTablesReady ? 'PostgreSQL (enginetracking)' : 'High-Performance Local Store'
+    activeSource: isTablesReady ? `PostgreSQL (${POSTGRES_DB})` : 'High-Performance Local Store'
   };
 }
 

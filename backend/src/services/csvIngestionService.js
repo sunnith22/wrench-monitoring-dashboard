@@ -39,6 +39,7 @@ const { ALL_WRENCH_ASSETS } = require('../data/wrenchCatalog');
 const { query, localFallbackCycles, getPostgresStatus } = require('../config/postgresDB');
 const { getToolThreshold } = require('./configService');
 const { dispatchPulseEmailAlert } = require('./emailService');
+const { getSystemDateKeys, normalizeCsvTimestamp, extractDateIso } = require('../utils/dateUtils');
 
 // Mount Paths (Server 10.82.126.73 mounts or Windows network shares)
 const URYU_MOUNT_PATH = process.env.URYU_MOUNT_PATH || '/mnt/torque_wrench';
@@ -50,6 +51,7 @@ const FALLBACK_MOUNT = process.env.DATA_MOUNT_PATH || 'Z:\\';
 // Memory trackers to prevent redundant re-reading
 const fileLineTracker = new Map();
 const processedIndividualFiles = new Set();
+let lastSyncedDateCompact = null;
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -68,19 +70,11 @@ let lastSyncStats = {
 };
 
 /**
- * Returns formatted date strings for folder matching
- * e.g. "20261116" (UEC-4800 / Yokota standard) and "16-11-2026"
+ * Returns formatted system local date strings for folder matching
+ * e.g. "20261125" (UEC-4800 / Yokota standard) and "25-11-2026"
  */
 function getDateKeys(date = new Date()) {
-  const yyyy = String(date.getFullYear());
-  const mm = String(date.getMonth() + 1).padStart(2, '0');
-  const dd = String(date.getDate()).padStart(2, '0');
-
-  return {
-    compact: `${yyyy}${mm}${dd}`,          // "20261116" (Standard plant folder)
-    dashes: `${dd}-${mm}-${yyyy}`,          // "16-11-2026"
-    iso: `${yyyy}-${mm}-${dd}`             // "2026-11-16"
-  };
+  return getSystemDateKeys(date);
 }
 
 /**
@@ -138,7 +132,7 @@ function resolveWrench(folderToken, ipToken = null, fileName = '') {
  * Once Line 3 ("Final: ... Puls 17 Trq 7") is parsed, it INSTANTLY destroys
  * the stream and releases the file handle. Never parses curve points.
  */
-function parseIndividualCycleFileSafely(filePath, fileName) {
+function parseIndividualCycleFileSafely(filePath, fileName, targetDateIso = getSystemDateKeys().iso, fileMtime = null) {
   return new Promise((resolve) => {
     let resolved = false;
     let fileStream = null;
@@ -208,12 +202,25 @@ function parseIndividualCycleFileSafely(filePath, fileName) {
       if (!resolved) resolved = true;
       if (!finalRowData) return resolve(null);
 
-      let tighteningTime = new Date().toISOString();
       const baseName = path.basename(fileName, path.extname(fileName));
+      let tighteningTime = '';
       const timeMatch = baseName.match(/(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})/);
       if (timeMatch) {
         tighteningTime = `${timeMatch[1]}-${timeMatch[2]}-${timeMatch[3]} ${timeMatch[4]}:${timeMatch[5]}:${timeMatch[6]}`;
+      } else {
+        const dateMatch = baseName.match(/_(\d{4})(\d{2})(\d{2})(?:_|$)/);
+        const datePart = dateMatch ? `${dateMatch[1]}-${dateMatch[2]}-${dateMatch[3]}` : targetDateIso;
+        const refTime = fileMtime instanceof Date ? fileMtime : new Date();
+        const hh = String(refTime.getHours()).padStart(2, '0');
+        const mi = String(refTime.getMinutes()).padStart(2, '0');
+        const ss = String(refTime.getSeconds()).padStart(2, '0');
+        tighteningTime = `${datePart} ${hh}:${mi}:${ss}`;
       }
+
+      const seqMatch = baseName.match(/_(\d+)$/);
+      const cycleCounter = seqMatch
+        ? parseInt(seqMatch[1], 10) || 1
+        : parseInt(baseName.slice(-6) || '1', 10) || 1;
 
       resolve({
         tighteningTime,
@@ -223,7 +230,7 @@ function parseIndividualCycleFileSafely(filePath, fileName) {
         torque: finalRowData.torque || 0,
         angle: finalRowData.angle || 0,
         judgement: 'OK',
-        cycleCounter: parseInt(baseName.slice(-6) || '1', 10) || 1
+        cycleCounter
       });
     });
 
@@ -235,9 +242,10 @@ function parseIndividualCycleFileSafely(filePath, fileName) {
 }
 
 /**
- * Parses summary CSV file (e.g. F-Data*.csv) incrementally
+ * Parses summary CSV file (e.g. F-Data*.csv) incrementally, strictly keeping rows
+ * that match targetDateIso (system date today).
  */
-async function parseSummaryCsvFileSafely(filePath) {
+async function parseSummaryCsvFileSafely(filePath, targetDateIso = getSystemDateKeys().iso) {
   const lastLineRead = fileLineTracker.get(filePath) || 0;
   let fileStream = null;
 
@@ -276,26 +284,29 @@ async function parseSummaryCsvFileSafely(filePath) {
         return '';
       };
 
-      const tighteningTime = getVal('tightening date/time', 'date/time', 'timestamp') || cols[0] || '';
+      const rawTime = getVal('tightening date/time', 'date/time', 'timestamp') || cols[0] || '';
+      const tighteningTime = rawTime ? normalizeCsvTimestamp(rawTime, targetDateIso) : '';
+      if (!tighteningTime || extractDateIso(tighteningTime) !== targetDateIso) {
+        continue; // Strictly match system date today only
+      }
+
       const workNo = getVal('workno.', 'work no', 'barcode') || String(currentLine - 4);
-      const pulseRaw = getVal('number of pulses', 'no.of pulses', 'pulses', 'puls') || cols[3] || '0';
+      const pulseRaw = getVal('number of pulses', 'no.of pulses', 'no.of.pulse', 'pulses', 'puls') || cols[3] || '0';
       const torqueRaw = getVal('torque', 'trq') || cols[4] || '0';
       const angleRaw = getVal('angle', 'deg') || cols[5] || '0';
       const judgement = (getVal('judgement', 'judgment', 'status') || 'OK').toUpperCase();
       const count = parseInt(getVal('count') || workNo || String(currentLine - 4), 10) || (currentLine - 4);
 
-      if (tighteningTime) {
-        newRows.push({
-          tighteningTime,
-          receptionTime: tighteningTime,
-          workNo,
-          pulseCount: parseInt(pulseRaw, 10) || 0,
-          torque: parseFloat(torqueRaw) || 0,
-          angle: parseFloat(angleRaw) || 0,
-          judgement,
-          cycleCounter: count
-        });
-      }
+      newRows.push({
+        tighteningTime,
+        receptionTime: tighteningTime,
+        workNo,
+        pulseCount: parseInt(pulseRaw, 10) || 0,
+        torque: parseFloat(torqueRaw) || 0,
+        angle: parseFloat(angleRaw) || 0,
+        judgement,
+        cycleCounter: count
+      });
     }
   }
 
@@ -311,6 +322,8 @@ async function parseSummaryCsvFileSafely(filePath) {
 async function insertCyclesToPostgres(wrench, cycles) {
   let inserted = 0;
   let skipped = 0;
+  const pgStatus = getPostgresStatus();
+  const isPgLive = pgStatus.connected && pgStatus.tablesReady;
 
   for (const c of cycles) {
     const activeLimit = getToolThreshold(wrench.wrench_id) || wrench.default_pulse_threshold || 25;
@@ -321,43 +334,40 @@ async function insertCyclesToPostgres(wrench, cycles) {
     const engineNo = `ENG-${String(c.workNo || '1').padStart(4, '0')}`;
 
     try {
-      // 1. Insert into PostgreSQL on 10.82.126.44
-      const sqlRes = await query(
-        `INSERT INTO wrench_tightening_cycles (
-          wrench_id, tool_name, station, folder, line, engine_no,
-          tightening_time, reception_time, torque_val, torque_status,
-          angle_val, angle_status, pulse_count, pulse_status, cycle_counter
-        ) VALUES (
-          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15
-        )
-        ON CONFLICT (wrench_id, tightening_time, cycle_counter) DO NOTHING
-        RETURNING id;`,
-        [
-          wrench.wrench_id,
-          wrench.tool_name,
-          String(wrench.station),
-          String(wrench.folder),
-          wrench.line || 'MK1',
-          engineNo,
-          c.tighteningTime,
-          c.receptionTime,
-          c.torque,
-          torqueStatus,
-          c.angle,
-          'OK',
-          c.pulseCount,
-          pulseStatus,
-          c.cycleCounter
-        ]
-      );
-
-      if (sqlRes && sqlRes.rowCount > 0) {
-        inserted++;
-      } else {
-        skipped++;
+      let rowInserted = false;
+      if (isPgLive) {
+        const sqlRes = await query(
+          `INSERT INTO wrench_tightening_cycles (
+            wrench_id, tool_name, station, folder, line, engine_no,
+            tightening_time, reception_time, torque_val, torque_status,
+            angle_val, angle_status, pulse_count, pulse_status, cycle_counter
+          ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15
+          )
+          ON CONFLICT (wrench_id, tightening_time, cycle_counter) DO NOTHING
+          RETURNING id;`,
+          [
+            wrench.wrench_id,
+            wrench.tool_name,
+            String(wrench.station),
+            String(wrench.folder),
+            wrench.line_code || wrench.line || 'MK1',
+            engineNo,
+            c.tighteningTime,
+            c.receptionTime,
+            c.torque,
+            torqueStatus,
+            c.angle,
+            'OK',
+            c.pulseCount,
+            pulseStatus,
+            c.cycleCounter
+          ]
+        );
+        rowInserted = Boolean(sqlRes && sqlRes.rowCount > 0);
       }
 
-      // 2. Update local fallback cache
+      // Update local fallback cache
       const alreadyInFallback = localFallbackCycles.some(
         f => f.wrench_id === wrench.wrench_id && f.tightening_time === c.tighteningTime && f.cycle_counter === c.cycleCounter
       );
@@ -368,7 +378,7 @@ async function insertCyclesToPostgres(wrench, cycles) {
           tool_name: wrench.tool_name,
           station: String(wrench.station),
           folder: String(wrench.folder),
-          line: wrench.line || 'MK1',
+          line: wrench.line_code || wrench.line || 'MK1',
           engine_no: engineNo,
           tightening_time: c.tighteningTime,
           reception_time: c.receptionTime,
@@ -381,23 +391,25 @@ async function insertCyclesToPostgres(wrench, cycles) {
           cycle_counter: c.cycleCounter,
           created_at: new Date().toISOString()
         });
+        if (!isPgLive) rowInserted = true;
       }
 
-      // 3. Alert dispatch if threshold breached
+      if (rowInserted) inserted++;
+      else skipped++;
+
+      // Alert dispatch if threshold breached
       if (c.pulseCount > activeLimit) {
         try {
           await dispatchPulseEmailAlert({
-            wrench_id: wrench.wrench_id,
-            tool_name: wrench.tool_name,
+            wrenchId: wrench.wrench_id,
+            toolName: wrench.tool_name,
             station: wrench.station,
             folder: wrench.folder,
-            assembly_name: wrench.assembly_name,
-            sub_assembly_name: wrench.sub_assembly_name,
-            pulse_count: c.pulseCount,
-            threshold: activeLimit,
+            measuredPulse: c.pulseCount,
+            pulseLimit: activeLimit,
             torque: c.torque,
             angle: c.angle,
-            engine_number: engineNo,
+            engineNumber: engineNo,
             timestamp: c.tighteningTime
           });
           lastSyncStats.alertsTriggered++;
@@ -414,7 +426,8 @@ async function insertCyclesToPostgres(wrench, cycles) {
 }
 
 /**
- * Discovers subdirectories under base path (e.g. DATA-28mar, AppData, etc.)
+ * Discovers data subdirectories under base path (e.g. DATA-28mar, YOKOTA),
+ * skipping unrelated Windows OS directories such as AppData.
  */
 async function discoverRootDirectories(basePath) {
   const roots = [basePath];
@@ -423,7 +436,7 @@ async function discoverRootDirectories(basePath) {
     for (const entry of entries) {
       if (entry.isDirectory() && !entry.name.startsWith('.') && !entry.name.startsWith('$')) {
         const lower = entry.name.toLowerCase();
-        if (lower.startsWith('data') || lower.startsWith('appdata')) {
+        if (lower.startsWith('data') || lower.includes('yokota') || lower.includes('uryu')) {
           roots.push(path.join(basePath, entry.name));
         }
       }
@@ -496,9 +509,9 @@ async function scanAndIngestMountRoot(mountRoot, dateKeys) {
           const wrench = resolveWrench(folderNumber, null, file);
           if (!wrench) continue;
 
-          // Summary CSV
+          // Summary CSV (filtered strictly to system date today)
           if (file.startsWith('F-Data') || file.toLowerCase().includes('summary') || file.toLowerCase().includes('tightening')) {
-            const summaryRows = await parseSummaryCsvFileSafely(fullPath);
+            const summaryRows = await parseSummaryCsvFileSafely(fullPath, dateKeys.iso);
             if (summaryRows.length > 0) {
               const { inserted, skipped } = await insertCyclesToPostgres(wrench, summaryRows);
               rowsAdded += inserted;
@@ -507,9 +520,20 @@ async function scanAndIngestMountRoot(mountRoot, dateKeys) {
                 console.log(`   -> [${wrench.wrench_id}] ${file}: +${inserted} new cycles saved.`);
               }
             }
-          } else if (/^\d{8,}/.test(file)) {
+          } else if (/^\d{8,}/.test(file) || /_20\d{6}_/.test(file)) {
+            const dateTokenMatch = file.match(/(20\d{6})/);
+            if (dateTokenMatch && dateTokenMatch[1] !== dateKeys.compact) {
+              processedIndividualFiles.add(fullPath);
+              continue; // Skip any file not matching today's system date
+            }
+
+            let fileMtime = null;
+            try {
+              fileMtime = (await fsp.stat(fullPath)).mtime;
+            } catch (e) {}
+
             // Individual cycle CSV: read Line 3 micro-buffer
-            const cycle = await parseIndividualCycleFileSafely(fullPath, file);
+            const cycle = await parseIndividualCycleFileSafely(fullPath, file, dateKeys.iso, fileMtime);
             processedIndividualFiles.add(fullPath);
 
             if (cycle) {
@@ -543,14 +567,22 @@ async function runCsvPullJob() {
   const startTime = new Date();
   const dateKeys = getDateKeys(startTime);
 
+  // Reset per-day file cache whenever the system calendar date rolls over
+  if (lastSyncedDateCompact && lastSyncedDateCompact !== dateKeys.compact) {
+    processedIndividualFiles.clear();
+    fileLineTracker.clear();
+  }
+  lastSyncedDateCompact = dateKeys.compact;
+
   console.log(`\n================================================================`);
-  console.log(`🛡️  [Stealth CSV Ingestion] Pulling shop-floor telemetry for: ${dateKeys.compact}`);
+  console.log(`🛡️  [Stealth CSV Ingestion] Pulling shop-floor telemetry for TODAY: ${dateKeys.compact} (${dateKeys.iso})`);
   console.log(`    Data Source: Mount Points /mnt/torque_wrench & /mnt/yokota`);
-  console.log(`    Target Server: PostgreSQL on 10.82.126.44 (DB: enginetracking)`);
+  console.log(`    Target Server: PostgreSQL on ${process.env.POSTGRES_HOST || '10.82.126.44'} (DB: ${process.env.POSTGRES_DB || 'tnga_wrench_db'})`);
   console.log(`================================================================`);
 
   lastSyncStats.status = 'RUNNING';
   lastSyncStats.lastRunTimestamp = startTime.toISOString();
+  lastSyncStats.alertsTriggered = 0;
   lastSyncStats.error = null;
 
   // 1. Resolve active URYU mount path
@@ -603,11 +635,13 @@ async function runCsvPullJob() {
 
   return {
     success: true,
+    date: dateKeys.compact,
     uryuSource: activeUryu || 'NOT_MOUNTED',
     yokotaSource: activeYokota || 'NOT_MOUNTED',
     filesProcessed: totalFilesChecked,
     rowsIngested: totalRowsAdded,
     duplicatesSkipped: totalDuplicatesSkipped,
+    alertsTriggered: lastSyncStats.alertsTriggered,
     durationMs
   };
 }
@@ -740,10 +774,14 @@ async function getFolderTelemetryDirect(folderNumber, targetDateInput = null, by
   for (const file of csvFiles) {
     const fullPath = path.join(directMatch.foundPath, file);
     if (file.startsWith('F-Data') || file.toLowerCase().includes('summary') || file.toLowerCase().includes('tightening')) {
-      const summaryRows = await parseSummaryCsvFileSafely(fullPath);
+      const summaryRows = await parseSummaryCsvFileSafely(fullPath, dateKeys.iso);
       records.push(...summaryRows);
-    } else if (/^\d{8,}/.test(file)) {
-      const cycle = await parseIndividualCycleFileSafely(fullPath, file);
+    } else if (/^\d{8,}/.test(file) || /_20\d{6}_/.test(file)) {
+      const dateTokenMatch = file.match(/(20\d{6})/);
+      if (dateTokenMatch && dateTokenMatch[1] !== dateKeys.compact) continue;
+      let fileMtime = null;
+      try { fileMtime = (await fsp.stat(fullPath)).mtime; } catch (e) {}
+      const cycle = await parseIndividualCycleFileSafely(fullPath, file, dateKeys.iso, fileMtime);
       if (cycle) records.push(cycle);
     }
   }

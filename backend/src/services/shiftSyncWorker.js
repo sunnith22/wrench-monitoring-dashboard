@@ -4,6 +4,7 @@ const { getSchedule, getToolThreshold, getToolThresholdDetails, recordAudit } = 
 const { dispatchPulseEmailAlert } = require('./emailService');
 const { query, getPostgresStatus } = require('../config/postgresDB');
 const { runCsvPullJob, getCsvIngestionStatus } = require('./csvIngestionService');
+const { getSystemDateKeys } = require('../utils/dateUtils');
 
 const SYNC_INTERVAL_MINUTES = parseInt(process.env.SYNC_INTERVAL_MINUTES || '5', 10);
 const SYNC_INTERVAL_MS = SYNC_INTERVAL_MINUTES * 60 * 1000;
@@ -54,24 +55,10 @@ async function runSyncPass(windowLabel = 'Manual Trigger') {
     await query(
       `INSERT INTO shift_sync_logs (sync_id, sync_source, window_name, start_time, status)
        VALUES ($1, $2, $3, $4, $5)`,
-      [syncBatchId, 'ADF_PIPELINE', windowLabel, syncStartTime, 'RUNNING']
+      [syncBatchId, 'MOUNT_CSV', windowLabel, syncStartTime, 'RUNNING']
     );
   } catch (logErr) {
     console.warn(`[Sync Log Warning]: ${logErr.message}`);
-  }
-
-  // If Azure Data Factory REST trigger is configured, invoke the ADF pipeline
-  if (ADF_TRIGGER_URL) {
-    try {
-      console.log(`📡 [ADF Remote] Triggering Azure Data Factory Pipeline at ${ADF_TRIGGER_URL}...`);
-      const adfResp = await axios.post(ADF_TRIGGER_URL, {
-        windowName: windowLabel,
-        shiftDate: syncStartTime.toISOString().split('T')[0].replace(/-/g, '')
-      }, { timeout: 5000 });
-      console.log(`✅ [ADF Remote] Pipeline run initiated: runId=${adfResp.data?.runId || 'SUCCESS'}`);
-    } catch (adfErr) {
-      console.warn(`⚠️ [ADF Remote Warning] ADF REST trigger unreachable: ${adfErr.message}. Executing local SQL ingestion...`);
-    }
   }
 
   let totalFetched = 0;
@@ -151,7 +138,7 @@ function startDynamicSyncScheduler() {
   // Shift Window Watcher: checks every 30 seconds against Admin Portal schedule
   setInterval(async () => {
     const now = new Date();
-    const todayStr = now.toISOString().split('T')[0];
+    const todayStr = getSystemDateKeys(now).iso;
 
     // Reset daily executed window cache at midnight
     if (now.getHours() === 0 && now.getMinutes() === 0 && now.getSeconds() < 30) {
