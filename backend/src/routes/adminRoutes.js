@@ -1,12 +1,58 @@
 const express = require('express');
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
 const router = express.Router();
 const configService = require('../services/configService');
 const { runSyncPass, getSyncStatus } = require('../services/shiftSyncWorker');
-const { sendTestEmail, getEmailHistory } = require('../services/emailService');
+const { sendTestEmail, sendAdminOtpEmail, getEmailHistory } = require('../services/emailService');
 
-// Hardcoded Default Admin Credentials (can be configured via ENV)
-const ADMIN_USER = process.env.ADMIN_USER || 'admin';
-const ADMIN_PASS = process.env.ADMIN_PASS || 'Tiei@2026';
+const ENV_FILE_PATH = path.resolve(__dirname, '../../.env');
+const DEFAULT_RECOVERY_EMAIL = 'g.sunnith@tiei.toyota-industries.com';
+const OTP_TTL_MS = 10 * 60 * 1000;
+const OTP_RESEND_COOLDOWN_MS = 60 * 1000;
+const MAX_OTP_ATTEMPTS = 5;
+
+let pendingOtpReset = null;
+
+function getAdminCredentials() {
+  return {
+    username: process.env.ADMIN_USER || 'admin',
+    password: process.env.ADMIN_PASS || 'Tiei@2026',
+    recoveryEmail: process.env.ADMIN_RECOVERY_EMAIL || DEFAULT_RECOVERY_EMAIL
+  };
+}
+
+function hashOtp(otp) {
+  return crypto.createHash('sha256').update(String(otp)).digest();
+}
+
+function persistAdminPasswordToEnv(newPassword) {
+  let content = '';
+  try {
+    if (fs.existsSync(ENV_FILE_PATH)) {
+      content = fs.readFileSync(ENV_FILE_PATH, 'utf8');
+    }
+  } catch (err) {
+    throw new Error(`Could not read .env file: ${err.message}`);
+  }
+
+  const lines = content ? content.split(/\r?\n/) : [];
+  let replaced = false;
+  const updatedLines = lines.map(line => {
+    if (/^\s*ADMIN_PASS\s*=/.test(line)) {
+      replaced = true;
+      return `ADMIN_PASS=${newPassword}`;
+    }
+    return line;
+  });
+
+  if (!replaced) {
+    updatedLines.push(`ADMIN_PASS=${newPassword}`);
+  }
+
+  fs.writeFileSync(ENV_FILE_PATH, updatedLines.join('\n'), 'utf8');
+}
 
 /**
  * Middleware: Simple Bearer / Session Auth Guard for Admin Actions
@@ -19,7 +65,7 @@ function requireAdminAuth(req, res, next) {
 
   const token = authHeader.replace(/^Bearer\s+/i, '');
   if (token.startsWith('tnga_admin_token_')) {
-    req.adminUser = ADMIN_USER;
+    req.adminUser = getAdminCredentials().username;
     return next();
   }
 
@@ -29,15 +75,16 @@ function requireAdminAuth(req, res, next) {
 // ---------------- 1. AUTHENTICATION ----------------
 router.post('/auth/login', (req, res) => {
   const { username, password } = req.body;
+  const creds = getAdminCredentials();
 
-  if (username === ADMIN_USER && password === ADMIN_PASS) {
+  if (username === creds.username && password === creds.password) {
     const token = `tnga_admin_token_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
     configService.recordAudit('LOGIN', `Admin user "${username}" logged in successfully`, username);
     return res.json({
       success: true,
       token,
       user: {
-        username: ADMIN_USER,
+        username: creds.username,
         role: 'SUPER_ADMIN',
         permissions: ['MANAGE_SCHEDULE', 'MANAGE_THRESHOLDS', 'MANAGE_EMAIL_ALERTS']
       }
@@ -48,6 +95,113 @@ router.post('/auth/login', (req, res) => {
     success: false,
     message: 'Invalid administrator credentials. Please check username and password.'
   });
+});
+
+router.post('/auth/forgot-password', async (req, res) => {
+  try {
+    const { recoveryEmail } = getAdminCredentials();
+    const now = Date.now();
+
+    if (pendingOtpReset && (now - pendingOtpReset.requestedAt) < OTP_RESEND_COOLDOWN_MS && now < pendingOtpReset.expiresAt) {
+      const waitSec = Math.ceil((OTP_RESEND_COOLDOWN_MS - (now - pendingOtpReset.requestedAt)) / 1000);
+      return res.status(429).json({
+        success: false,
+        message: `Please wait ${waitSec}s before requesting another OTP.`
+      });
+    }
+
+    const otp = String(crypto.randomInt(100000, 1000000));
+    pendingOtpReset = {
+      otpHash: hashOtp(otp),
+      expiresAt: now + OTP_TTL_MS,
+      requestedAt: now,
+      attempts: 0,
+      recipient: recoveryEmail
+    };
+
+    const mailResult = await sendAdminOtpEmail(recoveryEmail, otp, 10);
+    configService.recordAudit('ADMIN_OTP_REQUESTED', `Password reset OTP dispatched to ${recoveryEmail}`, 'system');
+
+    return res.json({
+      success: true,
+      recipient: recoveryEmail,
+      smtpConfigured: mailResult.smtpConfigured,
+      expiresInMinutes: 10,
+      message: mailResult.smtpConfigured
+        ? `A 6-digit OTP has been sent to ${recoveryEmail}.`
+        : `OTP generated for ${recoveryEmail} (configure SMTP_USER & SMTP_PASS in .env to send email; check server log in dev mode).`
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+router.post('/auth/reset-password', (req, res) => {
+  try {
+    const { otp, newPassword } = req.body || {};
+
+    if (!pendingOtpReset) {
+      return res.status(400).json({
+        success: false,
+        message: 'No active OTP request found. Please click "Forgot Password?" to request a new OTP.'
+      });
+    }
+
+    if (Date.now() > pendingOtpReset.expiresAt) {
+      pendingOtpReset = null;
+      return res.status(400).json({
+        success: false,
+        message: 'OTP has expired. Please request a new OTP.'
+      });
+    }
+
+    const otpStr = String(otp || '').trim();
+    if (!/^\d{6}$/.test(otpStr)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Please enter a valid 6-digit OTP code.'
+      });
+    }
+
+    const submittedHash = hashOtp(otpStr);
+    const isMatch = submittedHash.length === pendingOtpReset.otpHash.length &&
+      crypto.timingSafeEqual(submittedHash, pendingOtpReset.otpHash);
+
+    if (!isMatch) {
+      pendingOtpReset.attempts += 1;
+      if (pendingOtpReset.attempts >= MAX_OTP_ATTEMPTS) {
+        pendingOtpReset = null;
+        return res.status(400).json({
+          success: false,
+          message: 'Too many invalid OTP attempts. Please request a new OTP.'
+        });
+      }
+      return res.status(400).json({
+        success: false,
+        message: `Invalid OTP code (${MAX_OTP_ATTEMPTS - pendingOtpReset.attempts} attempts remaining).`
+      });
+    }
+
+    if (typeof newPassword !== 'string' || newPassword.length < 6 || newPassword.length > 128 || /[\r\n#]/.test(newPassword)) {
+      return res.status(400).json({
+        success: false,
+        message: 'New password must be 6–128 characters and cannot contain line breaks or "#".'
+      });
+    }
+
+    process.env.ADMIN_PASS = newPassword;
+    persistAdminPasswordToEnv(newPassword);
+    pendingOtpReset = null;
+
+    configService.recordAudit('ADMIN_PASSWORD_RESET', 'Admin password reset via OTP and saved to .env', 'admin');
+
+    return res.json({
+      success: true,
+      message: 'Password reset successfully and saved to .env. Please sign in with your new password.'
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
 });
 
 router.get('/auth/verify', requireAdminAuth, (req, res) => {

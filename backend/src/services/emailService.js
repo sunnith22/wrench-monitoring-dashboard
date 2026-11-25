@@ -209,6 +209,56 @@ async function sendTestEmail(testRecipient) {
   }
 }
 
+/**
+ * Sends a 6-digit Admin password-reset OTP to the configured recovery email.
+ */
+async function sendAdminOtpEmail(recipientEmail, otpCode, expiresMinutes = 10) {
+  const smtp = getSmtpCredentials();
+  const isSmtpConfigured = Boolean(smtp.user && smtp.pass);
+  const mailer = getMailTransporter();
+  const subject = '[TNGA Admin Portal] Password Reset OTP';
+  const text = [
+    'TNGA Admin Portal - Password Reset OTP',
+    '',
+    `Your One-Time Password (OTP) is: ${otpCode}`,
+    '',
+    `This code expires in ${expiresMinutes} minutes.`,
+    'If you did not request a password reset, please ignore this email.'
+  ].join('\n');
+  const html = `
+    <div style="font-family: Arial, sans-serif; font-size: 14px; color: #111827; line-height: 1.6;">
+      <p><strong>TNGA Admin Portal - Password Reset OTP</strong></p>
+      <p>Your One-Time Password (OTP) is: <strong style="font-size: 18px; letter-spacing: 2px;">${otpCode}</strong></p>
+      <p>This code is valid for ${expiresMinutes} minutes.</p>
+    </div>
+  `;
+
+  try {
+    const info = await mailer.sendMail({
+      from: smtp.from,
+      to: recipientEmail,
+      subject,
+      text,
+      html
+    });
+
+    if (isSmtpConfigured) {
+      console.log(`✅ [Admin OTP Email Sent] Reset OTP dispatched to ${recipientEmail}.`);
+    } else {
+      console.log(`ℹ️ [Admin OTP Dev Mode] SMTP credentials not set in .env. OTP for ${recipientEmail}: ${otpCode}`);
+    }
+
+    return {
+      success: true,
+      smtpConfigured: isSmtpConfigured,
+      recipient: recipientEmail,
+      messageId: info.messageId || 'DEV_STREAM_OTP'
+    };
+  } catch (err) {
+    throw new Error(`Failed to send OTP email: ${err.message}`);
+  }
+}
+
 function getEmailHistory() {
   return emailDispatchHistory;
 }
@@ -216,6 +266,7 @@ function getEmailHistory() {
 module.exports = {
   dispatchPulseEmailAlert,
   sendTestEmail,
+  sendAdminOtpEmail,
   getEmailHistory,
   getSmtpCredentials
 };
