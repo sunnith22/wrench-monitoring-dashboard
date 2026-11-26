@@ -135,6 +135,15 @@ function startDynamicSyncScheduler() {
     console.log(`   Pulls will execute ONLY during Admin Shift Windows (e.g. Tea Break, Lunch) or on manual trigger.`);
   }
 
+  // Run a single stealth startup sync after PostgreSQL init settles so today's mounted data loads automatically
+  if (process.env.SYNC_ON_STARTUP !== 'false') {
+    setTimeout(() => {
+      runSyncPass('Startup Sync').catch(err => {
+        console.warn(`[Startup Sync Warning]: ${err.message}`);
+      });
+    }, 3000);
+  }
+
   // Shift Window Watcher: checks every 30 seconds against Admin Portal schedule
   setInterval(async () => {
     const now = new Date();

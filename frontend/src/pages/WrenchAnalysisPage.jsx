@@ -83,6 +83,9 @@ export default function WrenchAnalysisPage({ wrenchId, onSelectWrench }) {
     if (displayedChartData && displayedChartData.length > 0) {
       setPulseStartIndex(0);
       setPulseEndIndex(displayedChartData.length - 1);
+    } else {
+      setPulseStartIndex(0);
+      setPulseEndIndex(undefined);
     }
   }, [displayedChartData.length]);
 
@@ -504,7 +507,11 @@ export default function WrenchAnalysisPage({ wrenchId, onSelectWrench }) {
             </div>
             <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '8px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <span>💡 <em>Drag the slider handles at the bottom of the graph to zoom into any time period. Drag the window to pan.</em></span>
-              <span>Showing cycles {pulseStartIndex + 1} to {(pulseEndIndex !== undefined ? pulseEndIndex : displayedChartData.length - 1) + 1} of {displayedChartData.length}</span>
+              <span>
+                {displayedChartData.length > 0
+                  ? `Showing cycles ${pulseStartIndex + 1} to ${(pulseEndIndex !== undefined ? pulseEndIndex : displayedChartData.length - 1) + 1} of ${displayedChartData.length}`
+                  : 'No cycles recorded for selected date'}
+              </span>
             </div>
           </div>
 
@@ -512,9 +519,9 @@ export default function WrenchAnalysisPage({ wrenchId, onSelectWrench }) {
           <TorqueChart
             chartData={displayedChartData}
             toolName={wrench?.tool_name || ''}
-            targetTorque={wrench?.approved_torque_target || 8.0}
-            torqueMin={wrench?.approved_torque_min || 6.5}
-            torqueMax={wrench?.approved_torque_max || 9.5}
+            targetTorque={wrench?.approved_torque_target ?? 0}
+            torqueMin={wrench?.approved_torque_min ?? 0}
+            torqueMax={wrench?.approved_torque_max ?? 0}
           />
 
           {/* 4. Daily Average Pulse Count Summary (Section 2.5 C) */}

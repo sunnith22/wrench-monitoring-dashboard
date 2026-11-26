@@ -14,6 +14,18 @@ import { ResponsiveContainer, PieChart, Pie, Cell, Tooltip } from 'recharts';
 
 export default function HomePage({ overview, onNavigateTab, onSelectWrench }) {
   const { kpi, judgement_donut = [], assembly_cards = [], recent_alerts = [] } = overview || {};
+  const totalWrenches = kpi?.total_registered_wrenches ?? 0;
+  const uryuCount = kpi?.uryu_count ?? 0;
+  const yokotaCount = kpi?.yokota_count ?? 0;
+  const totalOps = kpi?.total_operations ?? 0;
+  const okCount = kpi?.ok_count ?? 0;
+  const ngCount = kpi?.ng_count ?? 0;
+  const okPct = kpi?.ok_percentage ?? 0;
+  const ngPct = kpi?.ng_percentage ?? 0;
+  const openAlerts = kpi?.open_alerts ?? 0;
+  const ackAlerts = kpi?.acknowledged_alerts ?? 0;
+  const activeDonutData = judgement_donut.filter(d => Number(d?.value || 0) > 0);
+  const hasDonutData = (okCount + ngCount) > 0 && activeDonutData.length > 0;
 
   return (
     <div>
@@ -27,7 +39,7 @@ export default function HomePage({ overview, onNavigateTab, onSelectWrench }) {
                 Total Plant Wrenches
               </span>
               <div style={{ fontSize: '32px', fontWeight: 800, color: 'var(--text-primary)', marginTop: '4px' }}>
-                {kpi?.total_registered_wrenches || 73}
+                {totalWrenches}
                 <span style={{ fontSize: '13px', fontWeight: 500, color: 'var(--text-muted)', marginLeft: '6px' }}>
                   active tools
                 </span>
@@ -38,7 +50,7 @@ export default function HomePage({ overview, onNavigateTab, onSelectWrench }) {
             </div>
           </div>
           <div style={{ marginTop: '12px', fontSize: '12px', color: 'var(--text-secondary)' }}>
-            61 URYU + 12 Yokota Impact Wrenches
+            {uryuCount} URYU + {yokotaCount} Yokota Impact Wrenches
           </div>
         </div>
 
@@ -50,9 +62,9 @@ export default function HomePage({ overview, onNavigateTab, onSelectWrench }) {
                 OK Operations (Shift)
               </span>
               <div style={{ fontSize: '32px', fontWeight: 800, color: 'var(--accent-green-text)', marginTop: '4px' }}>
-                {kpi?.ok_count || 2736}
+                {okCount}
                 <span style={{ fontSize: '13px', fontWeight: 600, color: 'var(--accent-green-text)', marginLeft: '6px' }}>
-                  ({kpi?.ok_percentage || 98.6}%)
+                  ({okPct}%)
                 </span>
               </div>
             </div>
@@ -61,7 +73,7 @@ export default function HomePage({ overview, onNavigateTab, onSelectWrench }) {
             </div>
           </div>
           <div style={{ marginTop: '12px', fontSize: '12px', color: 'var(--text-secondary)' }}>
-            Total Recorded Cycles: <strong>{kpi?.total_operations || 2774}</strong>
+            Total Recorded Cycles: <strong>{totalOps}</strong>
           </div>
         </div>
 
@@ -73,9 +85,9 @@ export default function HomePage({ overview, onNavigateTab, onSelectWrench }) {
                 NG Deviations (Shift)
               </span>
               <div style={{ fontSize: '32px', fontWeight: 800, color: 'var(--accent-red-text)', marginTop: '4px' }}>
-                {kpi?.ng_count || 38}
+                {ngCount}
                 <span style={{ fontSize: '13px', fontWeight: 600, color: 'var(--accent-red-text)', marginLeft: '6px' }}>
-                  ({kpi?.ng_percentage || 1.4}%)
+                  ({ngPct}%)
                 </span>
               </div>
             </div>
@@ -96,7 +108,7 @@ export default function HomePage({ overview, onNavigateTab, onSelectWrench }) {
                 Active Open Alerts
               </span>
               <div style={{ fontSize: '32px', fontWeight: 800, color: '#b45309', marginTop: '4px' }}>
-                {kpi?.open_alerts || 1}
+                {openAlerts}
                 <span style={{ fontSize: '13px', fontWeight: 500, color: 'var(--text-muted)', marginLeft: '6px' }}>
                   requiring action
                 </span>
@@ -107,7 +119,7 @@ export default function HomePage({ overview, onNavigateTab, onSelectWrench }) {
             </div>
           </div>
           <div style={{ marginTop: '12px', fontSize: '12px', color: 'var(--text-secondary)' }}>
-            Acknowledged: <strong>{kpi?.acknowledged_alerts || 1}</strong>
+            Acknowledged: <strong>{ackAlerts}</strong>
           </div>
         </div>
       </div>
@@ -121,31 +133,49 @@ export default function HomePage({ overview, onNavigateTab, onSelectWrench }) {
               Production Judgement Summary (OK vs NG)
             </h3>
             <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
-              Shift Total: {kpi?.total_operations || 2774} Tightenings
+              Shift Total: {totalOps} Tightenings
             </span>
           </div>
 
           <div style={{ display: 'flex', alignItems: 'center', height: '220px' }}>
-            <div style={{ flex: 1, height: '100%' }}>
-              <ResponsiveContainer width="100%" height="100%">
-                <PieChart>
-                  <Pie
-                    data={judgement_donut}
-                    innerRadius={60}
-                    outerRadius={85}
-                    paddingAngle={4}
-                    dataKey="value"
-                  >
-                    {judgement_donut.map((entry, index) => (
-                      <Cell key={`cell-${index}`} fill={entry.color} />
-                    ))}
-                  </Pie>
-                  <Tooltip
-                    formatter={(val, name, item) => [`${val} cycles (${item.payload.percentage}%)`, name]}
-                    contentStyle={{ background: '#ffffff', borderRadius: '8px', border: '1px solid var(--border-color)' }}
-                  />
-                </PieChart>
-              </ResponsiveContainer>
+            <div style={{ flex: 1, height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              {hasDonutData ? (
+                <ResponsiveContainer width="100%" height="100%">
+                  <PieChart>
+                    <Pie
+                      data={activeDonutData}
+                      innerRadius={60}
+                      outerRadius={85}
+                      paddingAngle={activeDonutData.length > 1 ? 4 : 0}
+                      dataKey="value"
+                    >
+                      {activeDonutData.map((entry, index) => (
+                        <Cell key={`cell-${index}`} fill={entry.color} />
+                      ))}
+                    </Pie>
+                    <Tooltip
+                      formatter={(val, name, item) => [`${val} cycles (${item.payload.percentage}%)`, name]}
+                      contentStyle={{ background: '#ffffff', borderRadius: '8px', border: '1px solid var(--border-color)' }}
+                    />
+                  </PieChart>
+                </ResponsiveContainer>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: '10px', color: 'var(--text-muted)' }}>
+                  <div style={{
+                    width: '140px',
+                    height: '140px',
+                    borderRadius: '50%',
+                    border: '16px solid var(--bg-subtle)',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    alignItems: 'center',
+                    justifyContent: 'center'
+                  }}>
+                    <span style={{ fontSize: '22px', fontWeight: 800, color: 'var(--text-primary)' }}>0</span>
+                    <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>No Data Yet</span>
+                  </div>
+                </div>
+              )}
             </div>
 
             <div style={{ width: '180px', display: 'flex', flexDirection: 'column', gap: '14px' }}>
@@ -155,7 +185,7 @@ export default function HomePage({ overview, onNavigateTab, onSelectWrench }) {
                   <span style={{ fontSize: '13px', fontWeight: 600, color: 'var(--text-primary)' }}>OK Tightening</span>
                 </div>
                 <div style={{ fontSize: '18px', fontWeight: 700, color: 'var(--accent-green-text)', marginLeft: '18px' }}>
-                  {kpi?.ok_count || 2736} ({kpi?.ok_percentage || 98.6}%)
+                  {okCount} ({okPct}%)
                 </div>
               </div>
 
@@ -165,7 +195,7 @@ export default function HomePage({ overview, onNavigateTab, onSelectWrench }) {
                   <span style={{ fontSize: '13px', fontWeight: 600, color: 'var(--text-primary)' }}>NG Deviation</span>
                 </div>
                 <div style={{ fontSize: '18px', fontWeight: 700, color: 'var(--accent-red-text)', marginLeft: '18px' }}>
-                  {kpi?.ng_count || 38} ({kpi?.ng_percentage || 1.4}%)
+                  {ngCount} ({ngPct}%)
                 </div>
               </div>
             </div>
@@ -187,7 +217,18 @@ export default function HomePage({ overview, onNavigateTab, onSelectWrench }) {
           </div>
 
           <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-            {recent_alerts.map(alt => (
+            {recent_alerts.length === 0 ? (
+              <div style={{
+                padding: '36px 20px',
+                textAlign: 'center',
+                borderRadius: '8px',
+                background: 'var(--bg-subtle)',
+                color: 'var(--text-muted)',
+                fontSize: '13px'
+              }}>
+                No active priority alerts. Real threshold breaches will appear here after live ingestion.
+              </div>
+            ) : recent_alerts.map(alt => (
               <div
                 key={alt.alert_id}
                 style={{

@@ -1,18 +1,20 @@
 const express = require('express');
 const router = express.Router();
 const { ALL_WRENCH_ASSETS } = require('../data/wrenchCatalog');
-const { fetchWrenchOperations } = require('../services/dataIngestionService');
+const { fetchWrenchOperations, getRealAccumulatedPulsesMap } = require('../services/dataIngestionService');
 const { calculateWrenchAnalytics } = require('../services/analyticsService');
 const { getToolThreshold, getToolThresholdDetails } = require('../services/configService');
 
 /**
- * GET /api/wrenches - Master Asset Register list (73 tools)
+ * GET /api/wrenches - Master Asset Register list (with real accumulated pulses)
  */
-router.get('/', (req, res) => {
+router.get('/', async (req, res) => {
   const { assembly, sub_assembly, brand, search } = req.query;
+  const pulsesMap = await getRealAccumulatedPulsesMap();
 
   let filtered = ALL_WRENCH_ASSETS.map(w => ({
     ...w,
+    accumulated_pulses: pulsesMap.get(w.wrench_id) ?? 0,
     default_pulse_threshold: getToolThreshold(w.wrench_id),
     pulse_threshold_details: getToolThresholdDetails(w.wrench_id)
   }));

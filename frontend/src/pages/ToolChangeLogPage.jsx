@@ -28,7 +28,7 @@ export default function ToolChangeLogPage() {
         if (wRes.data && wRes.data.length > 0 && !selectedWrenchId) {
           setSelectedWrenchId(wRes.data[0].wrench_id);
           setRemovedSerial(wRes.data[0].tool_serial);
-          setPulsesAtChange(wRes.data[0].accumulated_pulses || 500000);
+          setPulsesAtChange(wRes.data[0].accumulated_pulses ?? 0);
         }
       })
       .catch(console.error)
@@ -44,7 +44,7 @@ export default function ToolChangeLogPage() {
     const found = wrenchesList.find(w => w.wrench_id === id);
     if (found) {
       setRemovedSerial(found.tool_serial);
-      setPulsesAtChange(found.accumulated_pulses || 500000);
+      setPulsesAtChange(found.accumulated_pulses ?? 0);
     }
   };
 
@@ -183,7 +183,7 @@ export default function ToolChangeLogPage() {
                   type="text"
                   value={technicianName}
                   onChange={(e) => setTechnicianName(e.target.value)}
-                  placeholder="e.g. K. Patel (Maintenance Team A)"
+                  placeholder="Enter technician or maintenance lead name"
                   className="form-input"
                   required
                 />
@@ -240,7 +240,13 @@ export default function ToolChangeLogPage() {
             </tr>
           </thead>
           <tbody>
-            {history.map(item => (
+            {history.length === 0 ? (
+              <tr>
+                <td colSpan="10" style={{ textAlign: 'center', padding: '36px', color: 'var(--text-muted)' }}>
+                  No tool replacement events recorded yet. Use "Record New Tool Replacement" above to log a real change.
+                </td>
+              </tr>
+            ) : history.map(item => (
               <tr key={item.change_id}>
                 <td style={{ fontFamily: 'monospace', fontWeight: 700 }}>{item.change_id}</td>
                 <td style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>

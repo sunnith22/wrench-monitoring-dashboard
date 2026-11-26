@@ -2,39 +2,8 @@ const express = require('express');
 const router = express.Router();
 const { ALL_WRENCH_ASSETS } = require('../data/wrenchCatalog');
 
-// In-Memory store for Tool Change History (fallback / fast lookup)
-const inMemoryToolChanges = [
-  {
-    change_id: 'TC-2026-001',
-    wrench_id: 'URYU_ST28_F016',
-    tool_name: 'Ex manifold stud',
-    assembly_name: 'Assembly 2',
-    sub_assembly_name: 'MK1',
-    station: '28',
-    change_timestamp: new Date('2026-09-12T09:30:00Z'),
-    pulses_at_change: 504120,
-    change_type: 'PLANNED_THRESHOLD',
-    removed_tool_serial: 'SN-URYU-48190',
-    replacement_tool_serial: 'SN-URYU-48202',
-    technician_name: 'K. Patel (Maintenance)',
-    comments: 'Routine 500k pulse overhaul completed. Hydraulic fluid replaced.'
-  },
-  {
-    change_id: 'TC-2026-002',
-    wrench_id: 'URYU_STBlock_sub_assy_F001',
-    tool_name: 'Crank case bolt',
-    assembly_name: 'Assembly 1',
-    sub_assembly_name: 'Block Sub-Assembly',
-    station: 'Block sub assy',
-    change_timestamp: new Date('2026-10-04T14:15:00Z'),
-    pulses_at_change: 382450,
-    change_type: 'UNPLANNED_FAULT',
-    removed_tool_serial: 'SN-URYU-48112',
-    replacement_tool_serial: 'SN-URYU-48155',
-    technician_name: 'R. Sharma (Line Tech)',
-    comments: 'Tool anvil drive wobble detected during audit. Replaced with calibrated standby unit.'
-  }
-];
+// In-Memory store for real Tool Change History (starts empty; populated strictly from operator entries)
+const inMemoryToolChanges = [];
 
 /**
  * GET /api/tool-changes - List all manual tool changes

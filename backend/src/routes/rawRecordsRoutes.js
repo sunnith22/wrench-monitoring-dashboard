@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { ALL_WRENCH_ASSETS } = require('../data/wrenchCatalog');
-const { fetchWrenchOperations } = require('../services/dataIngestionService');
+const { fetchAllOperationsForDate } = require('../services/dataIngestionService');
 
 /**
  * GET /api/data/records - Paginated Raw Operation Records Explorer
@@ -15,16 +15,10 @@ router.get('/', async (req, res) => {
       targetWrenches = targetWrenches.filter(w => w.wrench_id === wrench_id);
     } else if (assembly && assembly !== 'ALL') {
       targetWrenches = targetWrenches.filter(w => w.assembly_id === assembly || w.assembly_name === assembly);
-    } else {
-      // Default sample 12 representative wrenches across all 3 assemblies
-      targetWrenches = targetWrenches.slice(0, 12);
     }
 
-    // Concurrently fetch records across target tools
-    const recordBatches = await Promise.all(
-      targetWrenches.map(wrench => fetchWrenchOperations(wrench, date))
-    );
-    let allRecords = recordBatches.flat();
+    // Fetch real records across all target tools (URYU + YOKOTA) in a single query
+    let allRecords = await fetchAllOperationsForDate(date, targetWrenches);
 
     if (search) {
       const q = search.toLowerCase();

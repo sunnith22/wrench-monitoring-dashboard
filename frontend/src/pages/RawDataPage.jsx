@@ -119,6 +119,12 @@ export default function RawDataPage() {
                   Loading operation records...
                 </td>
               </tr>
+            ) : records.length === 0 ? (
+              <tr>
+                <td colSpan="13" style={{ textAlign: 'center', padding: '40px', color: 'var(--text-muted)' }}>
+                  No tightening operation records found for today.
+                </td>
+              </tr>
             ) : records.map(r => (
               <tr key={r.record_key}>
                 <td style={{ fontFamily: 'monospace', fontSize: '11px', color: 'var(--accent-blue)' }}>{r.record_key}</td>

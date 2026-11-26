@@ -1,13 +1,17 @@
 const express = require('express');
 const router = express.Router();
 const { ALL_WRENCH_ASSETS, ASSEMBLIES_METADATA } = require('../data/wrenchCatalog');
+const { getRealAccumulatedPulsesMap } = require('../services/dataIngestionService');
 
 /**
  * GET /api/assemblies - List all 3 assemblies with child sub-assemblies
  */
-router.get('/', (req, res) => {
+router.get('/', async (req, res) => {
+  const pulsesMap = await getRealAccumulatedPulsesMap();
   const result = ASSEMBLIES_METADATA.map(assy => {
-    const assyTools = ALL_WRENCH_ASSETS.filter(w => w.assembly_id === assy.id);
+    const assyTools = ALL_WRENCH_ASSETS
+      .filter(w => w.assembly_id === assy.id)
+      .map(w => ({ ...w, accumulated_pulses: pulsesMap.get(w.wrench_id) ?? 0 }));
     return {
       ...assy,
       total_tools: assyTools.length,
@@ -24,7 +28,7 @@ router.get('/', (req, res) => {
 /**
  * GET /api/assemblies/:assemblyId - Drilldown for specific assembly
  */
-router.get('/:assemblyId', (req, res) => {
+router.get('/:assemblyId', async (req, res) => {
   const { assemblyId } = req.params;
   const assy = ASSEMBLIES_METADATA.find(a => a.id === assemblyId);
 
@@ -32,7 +36,10 @@ router.get('/:assemblyId', (req, res) => {
     return res.status(404).json({ success: false, message: `Assembly '${assemblyId}' not found.` });
   }
 
-  const assyTools = ALL_WRENCH_ASSETS.filter(w => w.assembly_id === assy.id);
+  const pulsesMap = await getRealAccumulatedPulsesMap();
+  const assyTools = ALL_WRENCH_ASSETS
+    .filter(w => w.assembly_id === assy.id)
+    .map(w => ({ ...w, accumulated_pulses: pulsesMap.get(w.wrench_id) ?? 0 }));
 
   // Group tools by sub-assembly
   const subAssembliesWithTools = assy.sub_assemblies.map(sub => {

@@ -134,8 +134,8 @@ const ALL_WRENCH_ASSETS = [
       tool_serial: `SN-URYU-${serialCounter}`,
       controller_ip: `10.82.126.${100 + (parseInt(t.contr_no, 10) || 1)}`,
       status: 'ACTIVE',
-      accumulated_pulses: 140000 + (serialCounter * 830) % 250000,
-      last_calibration_date: '2026-08-15',
+      accumulated_pulses: 0,
+      last_calibration_date: null,
       created_at: new Date('2026-01-01')
     };
   }),
@@ -164,12 +164,60 @@ const ALL_WRENCH_ASSETS = [
       tool_serial: `SN-YOKOTA-${serialCounter}`,
       controller_ip: `10.82.127.${50 + (parseInt(t.contr_no, 10) || 1)}`,
       status: 'ACTIVE',
-      accumulated_pulses: 180000 + (serialCounter * 720) % 300000,
-      last_calibration_date: '2026-08-20',
+      accumulated_pulses: 0,
+      last_calibration_date: null,
       created_at: new Date('2026-01-01')
     };
   })
 ];
+
+/**
+ * Dynamically registers a newly discovered shop-floor tool folder / controller IP
+ * into the live catalog so incoming telemetry maps automatically without manual setup.
+ */
+function registerAutoDiscoveredWrench({ folderToken, ipToken = null, brand = 'URYU' }) {
+  const normalizedBrand = String(brand || 'URYU').toUpperCase() === 'YOKOTA' ? 'YOKOTA' : 'URYU';
+  const paddedFolder = String(folderToken || '0000').padStart(normalizedBrand === 'YOKOTA' ? 4 : 3, '0');
+  const lastOctet = ipToken ? String(ipToken).replace(/^.*[._]/, '').trim() : '';
+  const wrenchId = `${normalizedBrand}_AUTO_F${paddedFolder}`;
+
+  const existing = ALL_WRENCH_ASSETS.find(w => w.wrench_id === wrenchId);
+  if (existing) return existing;
+
+  const assy = resolveAssembly(normalizedBrand === 'YOKOTA' ? 'MK3' : 'MK1');
+  const controllerIp = ipToken && /^\d+(?:[._]\d+){3}$/.test(String(ipToken))
+    ? String(ipToken).replace(/_/g, '.')
+    : (normalizedBrand === 'YOKOTA' ? `120.0.100.${lastOctet || '1'}` : `10.82.126.${lastOctet || '1'}`);
+
+  const newAsset = {
+    wrench_id: wrenchId,
+    brand: normalizedBrand,
+    contr_no: lastOctet || paddedFolder,
+    station: `Auto-${paddedFolder}`,
+    folder: paddedFolder,
+    tool_name: `${normalizedBrand} Controller F${paddedFolder}`,
+    line_code: normalizedBrand === 'YOKOTA' ? 'MK3' : 'MK1',
+    assembly_id: assy.assembly_id,
+    assembly_name: assy.assembly_name,
+    sub_assembly_id: assy.sub_assembly_id,
+    sub_assembly_name: assy.sub_assembly_name,
+    default_pulse_threshold: 25,
+    approved_torque_target: 20.0,
+    approved_torque_min: 16.0,
+    approved_torque_max: 24.0,
+    tightening_time_target: 1.5,
+    tool_serial: `AUTO-${normalizedBrand}-${paddedFolder}`,
+    controller_ip: controllerIp,
+    status: 'ACTIVE',
+    accumulated_pulses: 0,
+    last_calibration_date: null,
+    auto_discovered: true,
+    created_at: new Date()
+  };
+
+  ALL_WRENCH_ASSETS.push(newAsset);
+  return newAsset;
+}
 
 const ASSEMBLIES_METADATA = [
   {
@@ -206,5 +254,6 @@ const ASSEMBLIES_METADATA = [
 module.exports = {
   ALL_WRENCH_ASSETS,
   ASSEMBLIES_METADATA,
-  resolveAssembly
+  resolveAssembly,
+  registerAutoDiscoveredWrench
 };

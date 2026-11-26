@@ -33,12 +33,11 @@ const fs = require('fs');
 const fsp = require('fs').promises;
 const path = require('path');
 const readline = require('readline');
-const axios = require('axios');
-const { exec } = require('child_process');
-const { ALL_WRENCH_ASSETS } = require('../data/wrenchCatalog');
+const { ALL_WRENCH_ASSETS, registerAutoDiscoveredWrench } = require('../data/wrenchCatalog');
 const { query, localFallbackCycles, getPostgresStatus } = require('../config/postgresDB');
 const { getToolThreshold } = require('./configService');
 const { dispatchPulseEmailAlert } = require('./emailService');
+const { recordAlert } = require('../routes/overviewRoutes');
 const { getSystemDateKeys, normalizeCsvTimestamp, extractDateIso } = require('../utils/dateUtils');
 
 // Mount Paths (Server 10.82.126.73 mounts or Windows network shares)
@@ -46,7 +45,13 @@ const URYU_MOUNT_PATH = process.env.URYU_MOUNT_PATH || '/mnt/torque_wrench';
 const YOKOTA_MOUNT_PATH = process.env.YOKOTA_MOUNT_PATH || '/mnt/yokota';
 const URYU_UNC_SHARE = process.env.URYU_UNC_SHARE || '\\\\172.16.105.234\\D';
 const YOKOTA_UNC_SHARE = process.env.YOKOTA_UNC_SHARE || '\\\\172.16.105.234\\c';
+const YOKOTA_LOCAL_PATH = process.env.YOKOTA_LOCAL_PATH || '';
 const FALLBACK_MOUNT = process.env.DATA_MOUNT_PATH || 'Z:\\';
+
+// Yokota daily log pattern: i0230 1a3828- 3A 50.4K 5219   8  133   20   6 OK   11/19 05:35:06
+// Also supports short engine numbers with space separator: i0230 1a 646- 1N 52.6? ...
+const YOKOTA_SUMMARY_LINE_RE =
+  /^[iI](\d{2,5})\s+([0-9a-zA-Z]*[a-zA-Z])\s*(\d+)-\s+(\S+)\s+([\d.]+)[^\d\s]?\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(\d{2})\/(\d{2})\s+(\d{2}:\d{2}:\d{2})$/;
 
 // Memory trackers to prevent redundant re-reading & debounce transient spikes
 const fileLineTracker = new Map();
@@ -98,35 +103,163 @@ async function resolveAccessiblePath(candidatePaths) {
 }
 
 /**
- * Resolves a Wrench Asset from folder number, controller IP, or filename
+ * Automatically extracts controller folder token, IP address, date, time,
+ * and vendor brand from URYU or Yokota CSV filenames.
+ * Examples:
+ *   - Yokota daily summary:  0230_120_0_100_97_20261119.csv
+ *   - Yokota cycle waveform: 0230_120_0_100_97_20261119_053506.csv
+ *   - URYU summary CSV:      F-Data_20261126.csv
+ *   - URYU individual CSV:   20261126083512.csv
  */
-function resolveWrench(folderToken, ipToken = null, fileName = '') {
-  const normFolder = String(folderToken || '').replace(/^0+/, '') || '0';
-  const pad3 = normFolder.padStart(3, '0');
-  const pad4 = normFolder.padStart(4, '0');
+function extractFileTelemetryMeta(fileName = '', fallbackFolder = null, preferredBrand = null) {
+  const cleanName = path.basename(String(fileName || ''));
+  const lower = cleanName.toLowerCase();
 
-  // 1. Direct folder match in Master Catalog
-  const byFolder = ALL_WRENCH_ASSETS.find(w => {
-    const wNorm = String(w.folder || '').replace(/^0+/, '');
-    return wNorm === normFolder || w.folder === pad3 || w.folder === pad4;
-  });
-  if (byFolder) return byFolder;
+  // Pattern 1: Yokota <folder>_<ip1>_<ip2>_<ip3>_<ip4>_<YYYYMMDD>[_<HHMMSS>].csv
+  let m = cleanName.match(/^(\d{2,5})_(\d{1,3}_\d{1,3}_\d{1,3}_\d{1,3})_(20\d{6})(?:_(\d{6}))?(?:_[^.]+)?\.csv$/i);
+  if (m) {
+    return {
+      folderToken: m[1],
+      ipToken: m[2],
+      dateToken: m[3],
+      timeToken: m[4] || null,
+      brandHint: 'YOKOTA',
+      isYokotaSummary: !m[4],
+      isSummaryCsv: false,
+      isIndividual: Boolean(m[4])
+    };
+  }
 
-  // 2. Controller Number / IP match (last octet e.g. "24" or "103")
+  // Pattern 2: Yokota inside tool folder <ip1>_<ip2>_<ip3>_<ip4>_<YYYYMMDD>[_<HHMMSS>].csv
+  m = cleanName.match(/^(\d{1,3}_\d{1,3}_\d{1,3}_\d{1,3})_(20\d{6})(?:_(\d{6}))?(?:_[^.]+)?\.csv$/i);
+  if (m) {
+    return {
+      folderToken: fallbackFolder,
+      ipToken: m[1],
+      dateToken: m[2],
+      timeToken: m[3] || null,
+      brandHint: 'YOKOTA',
+      isYokotaSummary: !m[3],
+      isSummaryCsv: false,
+      isIndividual: Boolean(m[3])
+    };
+  }
+
+  // Pattern 3: Generic summary CSV (URYU F-Data* / summary / tightening)
+  if (cleanName.startsWith('F-Data') || lower.includes('summary') || lower.includes('tightening')) {
+    return {
+      folderToken: fallbackFolder,
+      ipToken: null,
+      dateToken: (cleanName.match(/(20\d{6})/) || [])[1] || null,
+      timeToken: null,
+      brandHint: preferredBrand || 'URYU',
+      isYokotaSummary: false,
+      isSummaryCsv: true,
+      isIndividual: false
+    };
+  }
+
+  // Pattern 4: Individual cycle CSV with timestamp
+  const dateTimeMatch = cleanName.match(/(20\d{6})_?(\d{6})/);
+  const dateOnlyMatch = cleanName.match(/(20\d{6})/);
+  const isIndividual = /^\d{8,}/.test(cleanName) || /_20\d{6}(?:_\d{6})?(?:_|\.)/.test(cleanName);
+
+  return {
+    folderToken: fallbackFolder,
+    ipToken: null,
+    dateToken: dateOnlyMatch ? dateOnlyMatch[1] : null,
+    timeToken: dateTimeMatch ? dateTimeMatch[2] : null,
+    brandHint: preferredBrand || (lower.includes('yokota') ? 'YOKOTA' : null),
+    isYokotaSummary: false,
+    isSummaryCsv: false,
+    isIndividual
+  };
+}
+
+function findWrenchInPool(pool, folderToken, ipToken, upperFile) {
+  const validFolder = folderToken && !/^20\d{6}$/.test(String(folderToken));
+  if (validFolder) {
+    const normFolder = String(folderToken).replace(/^0+/, '') || '0';
+    const pad3 = normFolder.padStart(3, '0');
+    const pad4 = normFolder.padStart(4, '0');
+
+    const byFolder = pool.find(w => {
+      const wNorm = String(w.folder || '').replace(/^0+/, '');
+      return wNorm === normFolder || w.folder === pad3 || w.folder === pad4 || w.folder === String(folderToken);
+    });
+    if (byFolder) return byFolder;
+  }
+
   if (ipToken) {
-    const normIpNum = String(ipToken).replace(/^.*[._]/, '').trim();
-    const byContr = ALL_WRENCH_ASSETS.find(w => String(w.contr_no) === normIpNum);
+    const dottedIp = String(ipToken).replace(/_/g, '.').trim();
+    const byIp = pool.find(w => w.controller_ip && w.controller_ip === dottedIp);
+    if (byIp) return byIp;
+
+    const normIpNum = String(ipToken).replace(/^.*[._]/, '').replace(/^0+/, '').trim();
+    const byContr = pool.find(w => String(w.contr_no || '').replace(/^0+/, '') === normIpNum);
     if (byContr) return byContr;
 
-    const byFolderFromIp = ALL_WRENCH_ASSETS.find(w => String(w.folder || '').replace(/^0+/, '') === normIpNum);
+    const byFolderFromIp = pool.find(w => String(w.folder || '').replace(/^0+/, '') === normIpNum);
     if (byFolderFromIp) return byFolderFromIp;
   }
 
-  // 3. Filename token match
-  const upperFile = fileName.toUpperCase();
-  for (const tool of ALL_WRENCH_ASSETS) {
-    if (upperFile.includes(tool.wrench_id.toUpperCase())) return tool;
-    if (tool.folder && upperFile.includes(String(tool.folder))) return tool;
+  if (upperFile) {
+    for (const tool of pool) {
+      if (upperFile.includes(tool.wrench_id.toUpperCase())) return tool;
+    }
+    for (const tool of pool) {
+      if (tool.folder && new RegExp(`(^|[^0-9])0*${String(tool.folder).replace(/^0+/, '')}([^0-9]|$)`).test(upperFile)) {
+        return tool;
+      }
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Automatically resolves a Wrench Asset from folder number, controller IP, filename,
+ * and mount/format brand. Dynamically registers newly discovered controllers if absent.
+ */
+function resolveWrench(folderToken, ipToken = null, fileName = '', preferredBrand = null) {
+  const meta = extractFileTelemetryMeta(fileName, folderToken, preferredBrand);
+  const effectiveFolder = (folderToken && !/^20\d{6}$/.test(String(folderToken)))
+    ? String(folderToken)
+    : (meta.folderToken && !/^20\d{6}$/.test(String(meta.folderToken)) ? String(meta.folderToken) : null);
+  const effectiveIp = ipToken || meta.ipToken || null;
+  const effectiveBrand = preferredBrand || meta.brandHint || null;
+  const upperFile = String(fileName || '').toUpperCase();
+
+  // 1. Prioritize brand-matched assets first so Yokota 0039/0053 never collide with URYU 039/053
+  if (effectiveBrand) {
+    const brandPool = ALL_WRENCH_ASSETS.filter(
+      w => String(w.brand || '').toUpperCase() === String(effectiveBrand).toUpperCase()
+    );
+    const brandMatch = findWrenchInPool(brandPool, effectiveFolder, effectiveIp, upperFile);
+    if (brandMatch) return brandMatch;
+  }
+
+  // 2. Fall back across full catalog only when brand is unknown or not colliding on folder
+  if (!effectiveBrand) {
+    const anyMatch = findWrenchInPool(ALL_WRENCH_ASSETS, effectiveFolder, effectiveIp, upperFile);
+    if (anyMatch) return anyMatch;
+  } else {
+    // Allow fallback match across catalog only by explicit IP or full wrench_id
+    const crossMatch = findWrenchInPool(ALL_WRENCH_ASSETS, null, effectiveIp, upperFile);
+    if (crossMatch && String(crossMatch.brand || '').toUpperCase() === String(effectiveBrand).toUpperCase()) {
+      return crossMatch;
+    }
+  }
+
+  // 3. Auto-register newly discovered shop-floor controller/folder so zero real data is dropped
+  if (effectiveFolder || effectiveIp) {
+    const discovered = registerAutoDiscoveredWrench({
+      folderToken: effectiveFolder || String(effectiveIp).replace(/^.*[._]/, ''),
+      ipToken: effectiveIp,
+      brand: effectiveBrand || 'YOKOTA'
+    });
+    console.log(`🤖 [Auto-Mapped Tool]: Registered ${discovered.wrench_id} (${discovered.tool_name}, IP ${discovered.controller_ip})`);
+    return discovered;
   }
 
   return null;
@@ -210,17 +343,25 @@ function parseIndividualCycleFileSafely(filePath, fileName, targetDateIso = getS
 
       const baseName = path.basename(fileName, path.extname(fileName));
       let tighteningTime = '';
-      const timeMatch = baseName.match(/(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})/);
+      // Match both YYYYMMDD_HHMMSS (Yokota) and YYYYMMDDHHMMSS (URYU)
+      const timeMatch =
+        baseName.match(/(20\d{2})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})/) ||
+        baseName.match(/(20\d{2})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})/);
+
       if (timeMatch) {
         tighteningTime = `${timeMatch[1]}-${timeMatch[2]}-${timeMatch[3]} ${timeMatch[4]}:${timeMatch[5]}:${timeMatch[6]}`;
       } else {
-        const dateMatch = baseName.match(/_(\d{4})(\d{2})(\d{2})(?:_|$)/);
+        const dateMatch = baseName.match(/(?:^|_)(20\d{2})(\d{2})(\d{2})(?:_|$)/);
         const datePart = dateMatch ? `${dateMatch[1]}-${dateMatch[2]}-${dateMatch[3]}` : targetDateIso;
         const refTime = fileMtime instanceof Date ? fileMtime : new Date();
         const hh = String(refTime.getHours()).padStart(2, '0');
         const mi = String(refTime.getMinutes()).padStart(2, '0');
         const ss = String(refTime.getSeconds()).padStart(2, '0');
         tighteningTime = `${datePart} ${hh}:${mi}:${ss}`;
+      }
+
+      if (extractDateIso(tighteningTime) !== targetDateIso) {
+        return resolve(null);
       }
 
       const seqMatch = baseName.match(/_(\d+)$/);
@@ -235,8 +376,10 @@ function parseIndividualCycleFileSafely(filePath, fileName, targetDateIso = getS
         pulseCount: finalRowData.pulse || 0,
         torque: finalRowData.torque || 0,
         angle: finalRowData.angle || 0,
+        duration: finalRowData.time || 0,
         judgement: 'OK',
-        cycleCounter
+        cycleCounter,
+        sourceFile: fileName
       });
     });
 
@@ -248,11 +391,88 @@ function parseIndividualCycleFileSafely(filePath, fileName, targetDateIso = getS
 }
 
 /**
+ * Parses Yokota daily summary log file (e.g. 0230_120_0_100_97_20261119.csv)
+ * Format: i0230 1a3828- 3A 50.4K 5219   8  133   20   6 OK   11/19 05:35:06
+ * Returns:
+ *   - lookupByTimestamp: Map<"folderNorm_YYYY-MM-DD HH:MM:SS" -> { judgement, workNo, pulseCount, ... }>
+ *   - newRows: rows appended after fileLineTracker matching targetDateIso
+ */
+async function parseYokotaDailyLogSafely(filePath, fileName, targetDateIso = getSystemDateKeys().iso, ignoreTracker = false) {
+  const lastLineRead = ignoreTracker ? 0 : (fileLineTracker.get(filePath) || 0);
+  let fileStream = null;
+
+  try {
+    fileStream = fs.createReadStream(filePath, { flags: 'r', encoding: 'utf8', highWaterMark: 16384 });
+  } catch (err) {
+    return { lookupByKey: new Map(), newRows: [] };
+  }
+
+  const fileYear = (String(fileName || '').match(/(20\d{2})\d{4}/) || [])[1] || targetDateIso.slice(0, 4);
+  const rl = readline.createInterface({ input: fileStream, crlfDelay: Infinity });
+  const lookupByKey = new Map();
+  const newRows = [];
+  let currentLine = 0;
+
+  for await (const line of rl) {
+    currentLine++;
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+
+    const m = trimmed.match(YOKOTA_SUMMARY_LINE_RE);
+    if (!m) continue;
+
+    const controllerFolder = m[1];
+    const workNo = m[3];
+    const torque = parseFloat(m[5]) || 0;
+    const angle = parseFloat(m[7]) || 0;
+    const finalTimeCs = parseFloat(m[9]) || 0;
+    const summaryPulse = parseInt(m[10], 10) || 0;
+    const rawStatus = String(m[11] || 'OK').toUpperCase();
+    const judgement = rawStatus === 'OK' ? 'OK' : 'NG';
+    const month = m[12];
+    const day = m[13];
+    const hhmmss = m[14];
+    const dateIso = `${fileYear}-${month}-${day}`;
+
+    if (dateIso !== targetDateIso) continue;
+
+    const tighteningTime = `${dateIso} ${hhmmss}`;
+    const cycleCounter = parseInt(hhmmss.replace(/:/g, ''), 10) || currentLine;
+    const normFolder = String(controllerFolder).replace(/^0+/, '') || '0';
+    const key = `${normFolder}_${tighteningTime}`;
+
+    const parsedRow = {
+      controllerFolder,
+      tighteningTime,
+      receptionTime: tighteningTime,
+      workNo,
+      pulseCount: summaryPulse,
+      torque,
+      angle,
+      duration: Number((finalTimeCs / 100).toFixed(2)),
+      judgement,
+      cycleCounter,
+      sourceFile: fileName
+    };
+
+    lookupByKey.set(key, parsedRow);
+    if (ignoreTracker || currentLine > lastLineRead) {
+      newRows.push(parsedRow);
+    }
+  }
+
+  if (!ignoreTracker) {
+    fileLineTracker.set(filePath, currentLine);
+  }
+  return { lookupByKey, newRows };
+}
+
+/**
  * Parses summary CSV file (e.g. F-Data*.csv) incrementally, strictly keeping rows
  * that match targetDateIso (system date today).
  */
-async function parseSummaryCsvFileSafely(filePath, targetDateIso = getSystemDateKeys().iso) {
-  const lastLineRead = fileLineTracker.get(filePath) || 0;
+async function parseSummaryCsvFileSafely(filePath, targetDateIso = getSystemDateKeys().iso, ignoreTracker = false) {
+  const lastLineRead = ignoreTracker ? 0 : (fileLineTracker.get(filePath) || 0);
   let fileStream = null;
 
   try {
@@ -279,7 +499,7 @@ async function parseSummaryCsvFileSafely(filePath, targetDateIso = getSystemDate
       continue;
     }
 
-    if (currentLine > 4 && currentLine > lastLineRead) {
+    if (currentLine > 4 && (ignoreTracker || currentLine > lastLineRead)) {
       const cols = trimmed.split(',').map(c => c.replace(/^"|"$/g, '').trim());
 
       const getVal = (...keys) => {
@@ -300,7 +520,8 @@ async function parseSummaryCsvFileSafely(filePath, targetDateIso = getSystemDate
       const pulseRaw = getVal('number of pulses', 'no.of pulses', 'no.of.pulse', 'pulses', 'puls') || cols[3] || '0';
       const torqueRaw = getVal('torque', 'trq') || cols[4] || '0';
       const angleRaw = getVal('angle', 'deg') || cols[5] || '0';
-      const judgement = (getVal('judgement', 'judgment', 'status') || 'OK').toUpperCase();
+      const durationRaw = getVal('tightening time', 'duration', 'time') || '0';
+      const judgement = (getVal('judgement', 'judgment', 'status') || 'OK').toUpperCase().includes('NG') ? 'NG' : 'OK';
       const count = parseInt(getVal('count') || workNo || String(currentLine - 4), 10) || (currentLine - 4);
 
       newRows.push({
@@ -310,13 +531,17 @@ async function parseSummaryCsvFileSafely(filePath, targetDateIso = getSystemDate
         pulseCount: parseInt(pulseRaw, 10) || 0,
         torque: parseFloat(torqueRaw) || 0,
         angle: parseFloat(angleRaw) || 0,
+        duration: parseFloat(durationRaw) || 0,
         judgement,
-        cycleCounter: count
+        cycleCounter: count,
+        sourceFile: path.basename(filePath)
       });
     }
   }
 
-  fileLineTracker.set(filePath, currentLine);
+  if (!ignoreTracker) {
+    fileLineTracker.set(filePath, currentLine);
+  }
   return newRows;
 }
 
@@ -382,7 +607,8 @@ async function insertCyclesToPostgres(wrench, cycles) {
       ? 'CRITICAL'
       : (c.pulseCount >= activeLimit - 3 ? 'WARNING' : 'NORMAL');
     const torqueStatus = c.judgement === 'NG' ? 'NG' : 'OK';
-    const engineNo = `ENG-${String(c.workNo || '1').padStart(4, '0')}`;
+    const rawWork = String(c.workNo || '1').trim();
+    const engineNo = /^\d+$/.test(rawWork) ? `ENG-${rawWork.padStart(4, '0')}` : rawWork;
 
     try {
       let rowInserted = false;
@@ -439,6 +665,8 @@ async function insertCyclesToPostgres(wrench, cycles) {
           angle_status: 'OK',
           pulse_count: c.pulseCount,
           pulse_status: pulseStatus,
+          duration_sec: c.duration || 0,
+          source_file: c.sourceFile || 'LIVE_MOUNT_CSV',
           cycle_counter: c.cycleCounter,
           created_at: new Date().toISOString()
         });
@@ -460,6 +688,23 @@ async function insertCyclesToPostgres(wrench, cycles) {
           }
 
           if (streak.count >= CONSECUTIVE_BREACH_REQUIRED) {
+            recordAlert({
+              wrench_id: wrench.wrench_id,
+              tool_name: wrench.tool_name,
+              assembly_name: wrench.assembly_name,
+              sub_assembly_name: wrench.sub_assembly_name,
+              station: wrench.station,
+              event_time: c.tighteningTime,
+              severity: 'CRITICAL',
+              rule_reason: 'CONSECUTIVE_PULSE_BREACH',
+              observed_value: c.pulseCount,
+              threshold_limit: activeLimit,
+              unit: 'pulses',
+              engine_number: engineNo,
+              work_no: rawWork,
+              investigation_notes: `Consecutive pulse breaches (${streak.pulses.join(', ')}) exceeded limit ${activeLimit}.`
+            });
+
             try {
               const mailRes = await dispatchPulseEmailAlert({
                 wrenchId: wrench.wrench_id,
@@ -530,15 +775,205 @@ async function discoverRootDirectories(basePath) {
 }
 
 /**
- * Ingests files from a mount directory tree
+ * Reads & groups cycles from an active YYYYMMDD folder cleanly across:
+ *   1. Yokota daily summary logs (0230_120_0_100_97_YYYYMMDD.csv)
+ *   2. URYU / generic summary CSVs (F-Data*.csv)
+ *   3. Individual cycle waveform CSVs (..._YYYYMMDD_HHMMSS.csv or YYYYMMDDHHMMSS.csv)
+ * Enriches individual cycles with judgement/workNo from Yokota summary logs
+ * and deduplicates summary vs waveform rows so each physical bolt equals 1 cycle.
  */
-async function scanAndIngestMountRoot(mountRoot, dateKeys) {
+async function readActiveDateDirectoryCycles({
+  activeDateDir,
+  dateKeys,
+  catalogFolder = null,
+  ipHint = null,
+  preferredBrand = null,
+  filterNormFolder = null,
+  bypassProcessedCache = false
+}) {
+  let files = [];
+  try {
+    files = await fsp.readdir(activeDateDir);
+  } catch (readDirErr) {
+    return { groupedByWrench: new Map(), filesChecked: 0, totalCsvFiles: 0 };
+  }
+
+  const csvFiles = files
+    .filter(f => f.toLowerCase().endsWith('.csv'))
+    .sort((a, b) => a.localeCompare(b));
+
+  const yokotaSummaryLookup = new Map();
+  const pendingYokotaSummaryByWrench = new Map();
+  const groupedByWrench = new Map();
+  const coveredLookupKeys = new Set();
+  let filesChecked = 0;
+
+  const ensureGroup = (wrench) => {
+    if (!groupedByWrench.has(wrench.wrench_id)) {
+      groupedByWrench.set(wrench.wrench_id, { wrench, cycles: [] });
+    }
+    return groupedByWrench.get(wrench.wrench_id);
+  };
+
+  // Classify files in this folder
+  const classified = [];
+  for (const file of csvFiles) {
+    const meta = extractFileTelemetryMeta(file, catalogFolder, preferredBrand);
+    const effectiveFolder = meta.folderToken || catalogFolder;
+    if (filterNormFolder && effectiveFolder) {
+      const norm = String(effectiveFolder).replace(/^0+/, '') || '0';
+      if (norm !== filterNormFolder) continue;
+    }
+    classified.push({ file, fullPath: path.join(activeDateDir, file), meta });
+  }
+
+  // Pass 1: Read Yokota daily summary logs first to build OK/NG + engine/workNo lookup
+  for (const item of classified) {
+    if (!item.meta.isYokotaSummary) continue;
+    if (item.meta.dateToken && item.meta.dateToken !== dateKeys.compact) continue;
+
+    filesChecked++;
+    const { lookupByKey, newRows } = await parseYokotaDailyLogSafely(
+      item.fullPath,
+      item.file,
+      dateKeys.iso,
+      bypassProcessedCache
+    );
+
+    for (const [k, v] of lookupByKey.entries()) {
+      yokotaSummaryLookup.set(k, v);
+    }
+
+    if (newRows.length > 0) {
+      const wrench = resolveWrench(
+        item.meta.folderToken || newRows[0].controllerFolder || catalogFolder,
+        item.meta.ipToken || ipHint,
+        item.file,
+        preferredBrand || item.meta.brandHint
+      );
+      if (wrench) {
+        if (!pendingYokotaSummaryByWrench.has(wrench.wrench_id)) {
+          pendingYokotaSummaryByWrench.set(wrench.wrench_id, { wrench, rows: [] });
+        }
+        pendingYokotaSummaryByWrench.get(wrench.wrench_id).rows.push(...newRows);
+      }
+    }
+  }
+
+  // Pass 2: Read URYU/generic summary CSVs & individual waveform CSVs
+  for (const item of classified) {
+    if (item.meta.isYokotaSummary) continue;
+
+    if (!bypassProcessedCache && item.meta.isIndividual && processedIndividualFiles.has(item.fullPath)) {
+      continue;
+    }
+
+    const wrench = resolveWrench(
+      item.meta.folderToken || catalogFolder,
+      item.meta.ipToken || ipHint,
+      item.file,
+      preferredBrand || item.meta.brandHint
+    );
+    if (!wrench) continue;
+
+    if (item.meta.isSummaryCsv) {
+      filesChecked++;
+      const summaryRows = await parseSummaryCsvFileSafely(item.fullPath, dateKeys.iso, bypassProcessedCache);
+      if (summaryRows.length > 0) {
+        ensureGroup(wrench).cycles.push(...summaryRows);
+      }
+    } else if (item.meta.isIndividual) {
+      if (item.meta.dateToken && item.meta.dateToken !== dateKeys.compact) {
+        if (!bypassProcessedCache) processedIndividualFiles.add(item.fullPath);
+        continue;
+      }
+
+      filesChecked++;
+      let fileMtime = null;
+      try {
+        fileMtime = (await fsp.stat(item.fullPath)).mtime;
+      } catch (e) {}
+
+      const cycle = await parseIndividualCycleFileSafely(item.fullPath, item.file, dateKeys.iso, fileMtime);
+      if (!bypassProcessedCache) processedIndividualFiles.add(item.fullPath);
+
+      if (cycle) {
+        const folderNorm = String(wrench.folder || item.meta.folderToken || '').replace(/^0+/, '') || '0';
+        const lookupKey = `${folderNorm}_${cycle.tighteningTime}`;
+        const summaryInfo = yokotaSummaryLookup.get(lookupKey);
+        if (summaryInfo) {
+          cycle.judgement = summaryInfo.judgement;
+          cycle.workNo = summaryInfo.workNo;
+          if (!cycle.duration && summaryInfo.duration) cycle.duration = summaryInfo.duration;
+          coveredLookupKeys.add(lookupKey);
+        }
+        ensureGroup(wrench).cycles.push(cycle);
+      }
+
+      if (!bypassProcessedCache) await sleep(20);
+    }
+  }
+
+  // Pass 3: Add Yokota summary rows that did NOT already come from a waveform file
+  for (const { wrench, rows } of pendingYokotaSummaryByWrench.values()) {
+    const folderNorm = String(wrench.folder || '').replace(/^0+/, '') || '0';
+    for (const r of rows) {
+      const lookupKey = `${folderNorm}_${r.tighteningTime}`;
+      if (!coveredLookupKeys.has(lookupKey)) {
+        ensureGroup(wrench).cycles.push(r);
+      }
+    }
+  }
+
+  return { groupedByWrench, filesChecked, totalCsvFiles: csvFiles.length };
+}
+
+/**
+ * Ingests files from a mount directory tree supporting BOTH:
+ *   - Date-first root (Yokota): <root>/<YYYYMMDD>/<folder>_<ip>_<YYYYMMDD>_<HHMMSS>.csv
+ *   - Tool-first root (URYU / Yokota): <root>/<folder>/[UEC-4800 | 120_*]/<YYYYMMDD>/*.csv
+ */
+async function scanAndIngestMountRoot(mountRoot, dateKeys, sourceBrand = null) {
   let rowsAdded = 0;
   let dupsSkipped = 0;
   let filesChecked = 0;
   let toolFoldersFound = 0;
+  const visitedDateDirs = new Set();
 
   const searchRoots = await discoverRootDirectories(mountRoot);
+
+  const processDateDir = async (activeDateDir, catalogFolder = null, ipHint = null) => {
+    const resolvedDir = path.resolve(activeDateDir);
+    if (visitedDateDirs.has(resolvedDir)) return;
+
+    const dirExists = await fsp.access(resolvedDir).then(() => true).catch(() => false);
+    if (!dirExists) return;
+    visitedDateDirs.add(resolvedDir);
+
+    const { groupedByWrench, filesChecked: dirFiles } = await readActiveDateDirectoryCycles({
+      activeDateDir: resolvedDir,
+      dateKeys,
+      catalogFolder,
+      ipHint,
+      preferredBrand: sourceBrand,
+      bypassProcessedCache: false
+    });
+
+    filesChecked += dirFiles;
+
+    for (const { wrench, cycles } of groupedByWrench.values()) {
+      toolFoldersFound++;
+      if (cycles.length === 0) continue;
+
+      const { inserted, skipped } = await insertCyclesToPostgres(wrench, cycles);
+      rowsAdded += inserted;
+      dupsSkipped += skipped;
+      if (inserted > 0) {
+        console.log(`   -> [${wrench.wrench_id}] ${path.basename(resolvedDir)}: +${inserted} new cycles saved (${skipped} clubbed).`);
+      }
+      await sleep(50);
+    }
+  };
 
   for (const rootDir of searchRoots) {
     let entries = [];
@@ -548,94 +983,39 @@ async function scanAndIngestMountRoot(mountRoot, dateKeys) {
       continue;
     }
 
-    const folderCandidates = entries.filter(e => e.isDirectory() && /^\d+$/.test(e.name));
+    // 1. Date-first layout directly under rootDir (e.g. /mnt/yokota/20261126 or /mnt/yokota/yokota data/20261126)
+    for (const dEntry of entries) {
+      if (dEntry.isDirectory() && (dEntry.name === dateKeys.compact || dEntry.name === dateKeys.dashes)) {
+        await processDateDir(path.join(rootDir, dEntry.name), null, null);
+      }
+    }
+
+    // 2. Tool-first layout under rootDir (e.g. /mnt/torque_wrench/029/UEC-4800/20261126 or /mnt/yokota/0230/20261126)
+    const folderCandidates = entries.filter(e => e.isDirectory() && /^\d{1,5}$/.test(e.name));
 
     for (const fEntry of folderCandidates) {
       const folderNumber = fEntry.name;
       const toolDir = path.join(rootDir, folderNumber);
 
       const dateSubfolders = [
-        path.join(toolDir, 'UEC-4800', dateKeys.compact),
-        path.join(toolDir, dateKeys.compact),
-        path.join(toolDir, 'UEC-4800', dateKeys.dashes)
+        { dir: path.join(toolDir, 'UEC-4800', dateKeys.compact), ipHint: null },
+        { dir: path.join(toolDir, dateKeys.compact), ipHint: null },
+        { dir: path.join(toolDir, 'UEC-4800', dateKeys.dashes), ipHint: null }
       ];
 
-      // Check Yokota IP subfolder like 120_0_100_*
+      // Check Yokota IP subfolder like 120_0_100_* or YOKOTA
       try {
         const subEntries = await fsp.readdir(toolDir, { withFileTypes: true });
         for (const sub of subEntries) {
-          if (sub.isDirectory() && (sub.name.startsWith('120_') || sub.name.toUpperCase() === 'YOKOTA')) {
-            dateSubfolders.push(path.join(toolDir, sub.name, dateKeys.compact));
+          if (sub.isDirectory() && (/^\d{1,3}_\d{1,3}_\d{1,3}_\d{1,3}$/.test(sub.name) || sub.name.toUpperCase() === 'YOKOTA')) {
+            const subIp = /^\d{1,3}_/.test(sub.name) ? sub.name : null;
+            dateSubfolders.push({ dir: path.join(toolDir, sub.name, dateKeys.compact), ipHint: subIp });
           }
         }
       } catch (subErr) {}
 
-      for (const activeDateDir of dateSubfolders) {
-        const dirExists = await fsp.access(activeDateDir).then(() => true).catch(() => false);
-        if (!dirExists) continue;
-
-        toolFoldersFound++;
-        let files = [];
-        try {
-          files = await fsp.readdir(activeDateDir);
-        } catch (readDirErr) {
-          continue;
-        }
-
-        const csvFiles = files
-          .filter(f => f.toLowerCase().endsWith('.csv'))
-          .sort((a, b) => a.localeCompare(b));
-
-        for (const file of csvFiles) {
-          const fullPath = path.join(activeDateDir, file);
-
-          if (processedIndividualFiles.has(fullPath)) continue;
-
-          filesChecked++;
-          const wrench = resolveWrench(folderNumber, null, file);
-          if (!wrench) continue;
-
-          // Summary CSV (filtered strictly to system date today)
-          if (file.startsWith('F-Data') || file.toLowerCase().includes('summary') || file.toLowerCase().includes('tightening')) {
-            const summaryRows = await parseSummaryCsvFileSafely(fullPath, dateKeys.iso);
-            if (summaryRows.length > 0) {
-              const { inserted, skipped } = await insertCyclesToPostgres(wrench, summaryRows);
-              rowsAdded += inserted;
-              dupsSkipped += skipped;
-              if (inserted > 0) {
-                console.log(`   -> [${wrench.wrench_id}] ${file}: +${inserted} new cycles saved.`);
-              }
-            }
-          } else if (/^\d{8,}/.test(file) || /_20\d{6}_/.test(file)) {
-            const dateTokenMatch = file.match(/(20\d{6})/);
-            if (dateTokenMatch && dateTokenMatch[1] !== dateKeys.compact) {
-              processedIndividualFiles.add(fullPath);
-              continue; // Skip any file not matching today's system date
-            }
-
-            let fileMtime = null;
-            try {
-              fileMtime = (await fsp.stat(fullPath)).mtime;
-            } catch (e) {}
-
-            // Individual cycle CSV: read Line 3 micro-buffer
-            const cycle = await parseIndividualCycleFileSafely(fullPath, file, dateKeys.iso, fileMtime);
-            processedIndividualFiles.add(fullPath);
-
-            if (cycle) {
-              const { inserted, skipped } = await insertCyclesToPostgres(wrench, [cycle]);
-              rowsAdded += inserted;
-              dupsSkipped += skipped;
-              if (inserted > 0) {
-                console.log(`   -> [${wrench.wrench_id}] ${file}: Ingested pulse=${cycle.pulseCount}, torque=${cycle.torque} N·m.`);
-              }
-            }
-
-            await sleep(30);
-          }
-        }
-
-        await sleep(150);
+      for (const candidate of dateSubfolders) {
+        await processDateDir(candidate.dir, folderNumber, candidate.ipHint);
       }
     }
   }
@@ -663,7 +1043,7 @@ async function runCsvPullJob() {
 
   console.log(`\n================================================================`);
   console.log(`🛡️  [Stealth CSV Ingestion] Pulling shop-floor telemetry for TODAY: ${dateKeys.compact} (${dateKeys.iso})`);
-  console.log(`    Data Source: Mount Points /mnt/torque_wrench & /mnt/yokota`);
+  console.log(`    Data Source: Mount Points ${URYU_MOUNT_PATH} & ${YOKOTA_MOUNT_PATH}`);
   console.log(`    Target Server: PostgreSQL on ${process.env.POSTGRES_HOST || '10.82.126.44'} (DB: ${process.env.POSTGRES_DB || 'tnga_wrench_db'})`);
   console.log(`================================================================`);
 
@@ -675,7 +1055,7 @@ async function runCsvPullJob() {
   // 1. Resolve active URYU mount path
   const activeUryu = await resolveAccessiblePath([URYU_MOUNT_PATH, URYU_UNC_SHARE, FALLBACK_MOUNT]);
   // 2. Resolve active YOKOTA mount path
-  const activeYokota = await resolveAccessiblePath([YOKOTA_MOUNT_PATH, YOKOTA_UNC_SHARE]);
+  const activeYokota = await resolveAccessiblePath([YOKOTA_MOUNT_PATH, YOKOTA_UNC_SHARE, YOKOTA_LOCAL_PATH]);
 
   lastSyncStats.activeUryuSource = activeUryu;
   lastSyncStats.activeYokotaSource = activeYokota;
@@ -685,11 +1065,10 @@ async function runCsvPullJob() {
   let totalFilesChecked = 0;
   let totalToolFolders = 0;
 
-  // If filesystem mount is accessible directly
   if (activeUryu || activeYokota) {
     if (activeUryu) {
       console.log(`📂 [URYU Source Active]: ${activeUryu}`);
-      const resU = await scanAndIngestMountRoot(activeUryu, dateKeys);
+      const resU = await scanAndIngestMountRoot(activeUryu, dateKeys, 'URYU');
       totalRowsAdded += resU.rowsAdded;
       totalDuplicatesSkipped += resU.dupsSkipped;
       totalFilesChecked += resU.filesChecked;
@@ -698,7 +1077,7 @@ async function runCsvPullJob() {
 
     if (activeYokota) {
       console.log(`📂 [YOKOTA Source Active]: ${activeYokota}`);
-      const resY = await scanAndIngestMountRoot(activeYokota, dateKeys);
+      const resY = await scanAndIngestMountRoot(activeYokota, dateKeys, 'YOKOTA');
       totalRowsAdded += resY.rowsAdded;
       totalDuplicatesSkipped += resY.dupsSkipped;
       totalFilesChecked += resY.filesChecked;
@@ -741,6 +1120,7 @@ function getCsvIngestionStatus() {
     yokotaPath: YOKOTA_MOUNT_PATH,
     uryuUnc: URYU_UNC_SHARE,
     yokotaUnc: YOKOTA_UNC_SHARE,
+    yokotaLocalPath: YOKOTA_LOCAL_PATH || null,
     postgresServer: `${pg.host}:${pg.port}`,
     postgresConnected: pg.connected,
     postgresTableReady: pg.tablesReady,
@@ -751,27 +1131,38 @@ function getCsvIngestionStatus() {
 // In-memory cache for fast API reads without repeating SMB disk reads
 const folderApiCache = new Map();
 
+function parseTargetDateInput(targetDateInput) {
+  if (!targetDateInput) return new Date();
+  if (targetDateInput instanceof Date) return targetDateInput;
+  const raw = String(targetDateInput).trim();
+  const isoMatch = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (isoMatch) return new Date(Number(isoMatch[1]), Number(isoMatch[2]) - 1, Number(isoMatch[3]));
+  const compactMatch = raw.match(/^(\d{4})(\d{2})(\d{2})$/);
+  if (compactMatch) return new Date(Number(compactMatch[1]), Number(compactMatch[2]) - 1, Number(compactMatch[3]));
+  return new Date(raw);
+}
+
 /**
- * Directly resolves a folder path without scanning all 73 tools
+ * Directly resolves a folder path (Tool-first OR Date-first Yokota layout)
  */
 async function findDirectFolderDirectory(mountRoots, folderNumber, dateKeys) {
-  const norm = String(folderNumber || '').replace(/^0+/, '');
-  const variations = [
-    folderNumber,
+  const norm = String(folderNumber || '').replace(/^0+/, '') || '0';
+  const variations = [...new Set([
+    String(folderNumber),
     norm.padStart(3, '0'),
     norm.padStart(4, '0'),
     norm
-  ];
+  ])];
 
-  for (const root of mountRoots) {
+  for (const entry of mountRoots) {
+    const root = typeof entry === 'string' ? entry : entry?.root;
+    const brand = typeof entry === 'string' ? null : entry?.brand;
     if (!root) continue;
-    const subRoots = [
-      path.join(root, 'DATA-28mar'),
-      path.join(root, 'DATA'),
-      root
-    ];
+
+    const subRoots = await discoverRootDirectories(root);
 
     for (const subRoot of subRoots) {
+      // 1. Tool-first paths
       for (const f of variations) {
         const toolDir = path.join(subRoot, f);
         const candidatePaths = [
@@ -783,20 +1174,37 @@ async function findDirectFolderDirectory(mountRoots, folderNumber, dateKeys) {
         for (const cPath of candidatePaths) {
           try {
             await fsp.access(cPath, fs.constants.R_OK);
-            return { foundPath: cPath, folderNumber: f, rootDir: subRoot };
+            return { foundPath: cPath, folderNumber: f, rootDir: subRoot, brand, isDateFirst: false };
           } catch (e) {}
         }
 
         try {
           const subEntries = await fsp.readdir(toolDir, { withFileTypes: true });
           for (const sub of subEntries) {
-            if (sub.isDirectory() && (sub.name.startsWith('120_') || sub.name.toUpperCase() === 'YOKOTA')) {
+            if (sub.isDirectory() && (/^\d{1,3}_\d{1,3}_\d{1,3}_\d{1,3}$/.test(sub.name) || sub.name.toUpperCase() === 'YOKOTA')) {
               const yPath = path.join(toolDir, sub.name, dateKeys.compact);
               try {
                 await fsp.access(yPath, fs.constants.R_OK);
-                return { foundPath: yPath, folderNumber: f, rootDir: subRoot };
+                return { foundPath: yPath, folderNumber: f, rootDir: subRoot, brand: brand || 'YOKOTA', isDateFirst: false };
               } catch (e) {}
             }
+          }
+        } catch (e) {}
+      }
+
+      // 2. Date-first layout (<subRoot>/<YYYYMMDD>/<folder>_...)
+      for (const dName of [dateKeys.compact, dateKeys.dashes]) {
+        const datePath = path.join(subRoot, dName);
+        try {
+          const files = await fsp.readdir(datePath);
+          const hasMatchingFile = files.some(f => {
+            if (!f.toLowerCase().endsWith('.csv')) return false;
+            const meta = extractFileTelemetryMeta(f, null, brand);
+            const fNorm = String(meta.folderToken || '').replace(/^0+/, '') || '0';
+            return fNorm === norm;
+          });
+          if (hasMatchingFile) {
+            return { foundPath: datePath, folderNumber: norm.padStart(4, '0'), rootDir: subRoot, brand, isDateFirst: true };
           }
         } catch (e) {}
       }
@@ -811,9 +1219,7 @@ async function findDirectFolderDirectory(mountRoots, folderNumber, dateKeys) {
  * Ultra-fast direct jump with in-memory caching.
  */
 async function getFolderTelemetryDirect(folderNumber, targetDateInput = null, bypassCache = false) {
-  const targetDate = targetDateInput instanceof Date
-    ? targetDateInput
-    : (targetDateInput ? new Date(targetDateInput) : new Date());
+  const targetDate = parseTargetDateInput(targetDateInput);
   const dateKeys = getDateKeys(targetDate);
   const cacheKey = `${folderNumber}_${dateKeys.compact}`;
 
@@ -827,13 +1233,16 @@ async function getFolderTelemetryDirect(folderNumber, targetDateInput = null, by
   }
 
   const activeUryu = await resolveAccessiblePath([URYU_MOUNT_PATH, URYU_UNC_SHARE, FALLBACK_MOUNT]);
-  const activeYokota = await resolveAccessiblePath([YOKOTA_MOUNT_PATH, YOKOTA_UNC_SHARE]);
-  const mountRoots = [activeUryu, activeYokota].filter(Boolean);
+  const activeYokota = await resolveAccessiblePath([YOKOTA_MOUNT_PATH, YOKOTA_UNC_SHARE, YOKOTA_LOCAL_PATH]);
+  const mountRoots = [
+    activeUryu ? { root: activeUryu, brand: 'URYU' } : null,
+    activeYokota ? { root: activeYokota, brand: 'YOKOTA' } : null
+  ].filter(Boolean);
 
   if (mountRoots.length === 0) {
     return {
       success: false,
-      error: 'No active mount points found. Check /mnt/torque_wrench and /mnt/yokota.',
+      error: `No active mount points found. Check ${URYU_MOUNT_PATH} and ${YOKOTA_MOUNT_PATH}.`,
       records: []
     };
   }
@@ -847,45 +1256,38 @@ async function getFolderTelemetryDirect(folderNumber, targetDateInput = null, by
     };
   }
 
-  const wrench = resolveWrench(directMatch.folderNumber);
-  let files = [];
-  try {
-    files = await fsp.readdir(directMatch.foundPath);
-  } catch (err) {
-    return { success: false, error: err.message, records: [] };
-  }
+  const filterNormFolder = directMatch.isDateFirst
+    ? (String(folderNumber || '').replace(/^0+/, '') || '0')
+    : null;
 
-  const csvFiles = files.filter(f => f.toLowerCase().endsWith('.csv'));
-  const records = [];
+  const { groupedByWrench, filesChecked } = await readActiveDateDirectoryCycles({
+    activeDateDir: directMatch.foundPath,
+    dateKeys,
+    catalogFolder: directMatch.folderNumber,
+    preferredBrand: directMatch.brand,
+    filterNormFolder,
+    bypassProcessedCache: true
+  });
 
-  for (const file of csvFiles) {
-    const fullPath = path.join(directMatch.foundPath, file);
-    if (file.startsWith('F-Data') || file.toLowerCase().includes('summary') || file.toLowerCase().includes('tightening')) {
-      const summaryRows = await parseSummaryCsvFileSafely(fullPath, dateKeys.iso);
-      records.push(...summaryRows);
-    } else if (/^\d{8,}/.test(file) || /_20\d{6}_/.test(file)) {
-      const dateTokenMatch = file.match(/(20\d{6})/);
-      if (dateTokenMatch && dateTokenMatch[1] !== dateKeys.compact) continue;
-      let fileMtime = null;
-      try { fileMtime = (await fsp.stat(fullPath)).mtime; } catch (e) {}
-      const cycle = await parseIndividualCycleFileSafely(fullPath, file, dateKeys.iso, fileMtime);
-      if (cycle) records.push(cycle);
-    }
-  }
+  const firstGroup = Array.from(groupedByWrench.values())[0];
+  const wrench = firstGroup?.wrench || resolveWrench(directMatch.folderNumber, null, '', directMatch.brand);
+  const records = firstGroup?.cycles || [];
 
   const result = {
     success: true,
     folder: folderNumber,
+    wrench_id: wrench?.wrench_id || null,
     toolName: wrench?.tool_name || 'Unknown Tool',
     station: wrench?.station || 'N/A',
     date: dateKeys.compact,
     path: directMatch.foundPath,
-    totalFiles: csvFiles.length,
+    totalFiles: filesChecked,
     recordCount: records.length,
     records
   };
 
   folderApiCache.set(cacheKey, {
+    wrench_id: result.wrench_id,
     toolName: result.toolName,
     station: result.station,
     path: result.path,
@@ -913,7 +1315,10 @@ async function syncSingleFolder(folderNumber, targetDateInput = null) {
     };
   }
 
-  const wrench = resolveWrench(folderNumber);
+  const wrench = directData.wrench_id
+    ? ALL_WRENCH_ASSETS.find(w => w.wrench_id === directData.wrench_id) || resolveWrench(folderNumber)
+    : resolveWrench(folderNumber);
+
   if (!wrench) {
     return {
       success: false,
@@ -941,10 +1346,12 @@ async function syncSingleFolder(folderNumber, targetDateInput = null) {
 module.exports = {
   runCsvPullJob,
   resolveWrench,
+  extractFileTelemetryMeta,
   getCsvIngestionStatus,
   getFolderTelemetryDirect,
   syncSingleFolder,
   findDirectFolderDirectory,
+  scanAndIngestMountRoot,
   URYU_MOUNT_PATH,
   YOKOTA_MOUNT_PATH
 };

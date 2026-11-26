@@ -22,9 +22,9 @@ export default function AlertsTrackerPage({ onSelectWrench, onNavigateTab, onAle
 
   // Investigation / Closure Modal State
   const [selectedAlert, setSelectedAlert] = useState(null);
-  const [actionNotes, setActionNotes] = useState('Joint friction checked and verified within standard.');
+  const [actionNotes, setActionNotes] = useState('');
   const [actionTaken, setActionTaken] = useState('Joint re-torqued and verified with manual gauge');
-  const [userName, setUserName] = useState('M. Tanaka (Line Lead)');
+  const [userName, setUserName] = useState('');
   const [updating, setUpdating] = useState(false);
 
   const fetchAlerts = () => {
@@ -44,7 +44,7 @@ export default function AlertsTrackerPage({ onSelectWrench, onNavigateTab, onAle
     try {
       await TngaApi.updateAlertStatus(alertId, {
         status: 'ACKNOWLEDGED',
-        user_name: 'M. Tanaka (Supervisor)'
+        user_name: 'Line Supervisor'
       });
       fetchAlerts();
       if (onAlertUpdated) onAlertUpdated();
@@ -393,7 +393,7 @@ export default function AlertsTrackerPage({ onSelectWrench, onNavigateTab, onAle
                         value={userName}
                         onChange={(e) => setUserName(e.target.value)}
                         className="form-input"
-                        placeholder="e.g. M. Tanaka (Supervisor)"
+                        placeholder="Enter supervisor / technician name"
                         required
                       />
                     </div>
